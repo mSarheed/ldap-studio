@@ -796,7 +796,24 @@ public func searchDirectory(host: String, port: UInt16, useSsl: Bool,
     )).entries
 }
 
+/// The schema last read for each target this session. A directory's
+/// schema hardly ever changes, yet the browser (for autocomplete), the
+/// Schema window and Edit Entry each read it when they open — on a large
+/// directory, most of what opening them costs. They show this copy at once
+/// and read it again behind it.
+private var schemaCache: [LdapTarget: LdapSchema] = [:]
+
+public func cachedSchema(_ target: LdapTarget) -> LdapSchema? {
+    schemaCache[target]
+}
+
 public func fetchSchema(_ target: LdapTarget) async throws -> LdapSchema {
+    let schema = try await readSchema(target)
+    schemaCache[target] = schema
+    return schema
+}
+
+private func readSchema(_ target: LdapTarget) async throws -> LdapSchema {
     try await logged(.schema, endpoint: target.endpoint,
                      summary: "load schema",
                      detail: "base: cn=Subschema\nscope: base\nattrs: objectClasses attributeTypes") {

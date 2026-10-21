@@ -104,20 +104,23 @@ struct SchemaView: View {
 
     private func load() async {
         loadError = nil
+        let target = connection.ldapTarget
+        // Already read this session (usually by the browser): show it now,
+        // then swap in a fresh read if the server's has changed since.
+        if schema == nil, let cached = cachedSchema(target) {
+            // After the window's first frame: building the lists into the
+            // window's initial layout costs more than into one already up.
+            try? await Task.sleep(for: .zero)
+            schema = cached
+            applyPendingJump()
+        }
         do {
-            schema = try await fetchSchema(
-                host: connection.host,
-                port: UInt16(clamping: connection.port),
-                useSsl: connection.useSSL,
-                startTLS: connection.useStartTLS,
-                pinnedCertSHA256: connection.trustedCertSHA256,
-                options: connection.ldapOptions,
-                bindDn: connection.bindDN,
-                password: KeychainService.readPassword(for: connection.id) ?? ""
-            )
+            let fresh = try await fetchSchema(target)
+            if fresh != schema { schema = fresh }
             applyPendingJump()
         } catch {
-            loadError = "\(error)"
+            // A copy already showing is still the best there is.
+            if schema == nil { loadError = "\(error)" }
         }
     }
 
