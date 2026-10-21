@@ -548,6 +548,8 @@ final class DirectoryTree {
     }
 
     func refreshAll() async {
+        viewed = [:]
+        viewedOrder = []
         guard let root else {
             await loadRoot()
             return
@@ -655,6 +657,40 @@ final class DirectoryTree {
         return child
     }
 
+    // MARK: Entries already read
+
+    /// Full entries the detail view has read, by normalized DN, so going
+    /// back to one shows it straight away while it's read again. Kept to
+    /// the most recently viewed, and dropped whenever a write here touches
+    /// them (see Keeping up with writes).
+    @ObservationIgnored private var viewed: [String: DirectoryEntry] = [:]
+    @ObservationIgnored private var viewedOrder: [String] = []
+    private static let viewedLimit = 200
+
+    func viewedEntry(_ dn: String) -> DirectoryEntry? {
+        viewed[DN.normalize(dn)]
+    }
+
+    func noteViewed(_ entry: DirectoryEntry) {
+        let key = DN.normalize(entry.dn)
+        if viewed.updateValue(entry, forKey: key) != nil {
+            viewedOrder.removeAll { $0 == key }
+        }
+        viewedOrder.append(key)
+        if viewedOrder.count > Self.viewedLimit {
+            viewed[viewedOrder.removeFirst()] = nil
+        }
+    }
+
+    /// Forgets the viewed copies of `dn` and everything under it.
+    private func forgetViewed(within dn: String) {
+        let key = DN.normalize(dn)
+        let stale = viewedOrder.filter { DN.keyIsWithin($0, key) }
+        guard !stale.isEmpty else { return }
+        for k in stale { viewed[k] = nil }
+        viewedOrder.removeAll { DN.keyIsWithin($0, key) }
+    }
+
     /// Stops every read in flight — the window showing this tree closed.
     func cancelAll() {
         for task in loads.values { task.cancel() }
@@ -676,6 +712,7 @@ final class DirectoryTree {
 
     /// `dn` (and everything under it) no longer exists.
     func entryRemoved(_ dn: String) {
+        forgetViewed(within: dn)
         guard let node = node(dn) else { return }
         forget(node)
         if let parentDN = DN.parent(of: node.dn), let parent = self.node(parentDN) {
@@ -686,6 +723,7 @@ final class DirectoryTree {
 
     /// `dn`'s attributes changed — its icon or arrow might have too.
     func entryModified(_ dn: String) async {
+        forgetViewed(within: dn)
         guard let node = node(dn),
               let entry = try? await fetchEntry(target, dn: dn, attributes: TreeRow.treeAttributes)
         else { return }
@@ -701,6 +739,7 @@ final class DirectoryTree {
     /// Something changed under `dn` in ways not worth tracking one by one
     /// (an LDIF import, a partly finished bulk operation).
     func branchChanged(_ dn: String) async {
+        forgetViewed(within: dn)
         var ancestor: String? = dn
         while let current = ancestor, node(current) == nil {
             ancestor = DN.parent(of: current)

@@ -131,6 +131,9 @@ struct EntryDetailLoader: View {
     let onChange: (DirectoryChange) async -> Void
 
     @State private var entry: DirectoryEntry?
+    /// `entry` is the copy kept from an earlier visit (see
+    /// DirectoryTree.viewedEntry), shown while it's read again.
+    @State private var isShowingViewedCopy = false
     @State private var loadError: String?
     @State private var retryToken = 0
 
@@ -176,11 +179,18 @@ struct EntryDetailLoader: View {
     private func load() async {
         let dn = dn
         loadError = nil
+        // Seen earlier in this window: show that copy now, and the server's
+        // current one as soon as it's read.
+        let isShowing = entry.map { DN.same($0.dn, dn) } ?? false
+        if !isShowing, let viewed = tree.viewedEntry(dn) {
+            entry = viewed
+            isShowingViewedCopy = true
+        }
         do {
             let fetched = try await fetchEntry(connection.ldapTarget, dn: dn)
             guard !Task.isCancelled else { return }
             guard let fetched else {
-                loadError = "This entry no longer exists on the server."
+                failed("This entry no longer exists on the server.")
                 tree.entryRemoved(dn)
                 return
             }
@@ -188,10 +198,22 @@ struct EntryDetailLoader: View {
                                         hasChildren: tree.node(dn)?.mayHaveChildren ?? false)
             if let icon = tree.node(dn)?.icon { loaded.icon = icon }
             entry = loaded
+            isShowingViewedCopy = false
+            tree.noteViewed(loaded)
         } catch is CancellationError {
         } catch {
             guard !Task.isCancelled else { return }
-            loadError = "\(error)"
+            failed("\(error)")
+        }
+    }
+
+    /// An earlier visit's copy mustn't stand in for an entry that can't be
+    /// read now — show why instead.
+    private func failed(_ message: String) {
+        loadError = message
+        if isShowingViewedCopy {
+            entry = nil
+            isShowingViewedCopy = false
         }
     }
 }
