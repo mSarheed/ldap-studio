@@ -83,6 +83,17 @@ $(LIB): $(OBJ)
 	@mkdir -p $(dir $@)
 	libtool -static -o $@ $(OBJ)
 
+# Everything an object is compiled with, recorded so that a change to it —
+# a dependency moving to a new keg (openssl@3 → @4), another SDK or
+# architecture — rebuilds the objects rather than linking ones built
+# against the old headers. Compared while the Makefile is read, before make
+# looks at any object, so their timestamps don't come into it.
+BUILD_CONFIG := $(CC) $(ARCHFLAGS) $(MINFLAG) $(SYSROOT) $(CFLAGS) $(CPPFLAGS)
+CONFIG_STAMP := build/config.stamp
+ifneq ($(BUILD_CONFIG),$(shell cat $(CONFIG_STAMP) 2>/dev/null))
+$(shell mkdir -p build && rm -f $(OBJ) $(LIB) && echo '$(BUILD_CONFIG)' > $(CONFIG_STAMP))
+endif
+
 # -MMD -MP emits a build/src/foo.d listing every header foo.c pulls in, so
 # editing e.g. ldapstudio.h forces the affected .o files to rebuild.
 build/%.o: %.c
