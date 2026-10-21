@@ -57,6 +57,8 @@ struct SchemaView: View {
     @State private var jumpAttributeName: String?
     @State private var jumpObjectClassName: String?
     @State private var coordinator = SchemaJumpCoordinator.shared
+    /// A fresh read is under way, possibly behind a copy from earlier.
+    @State private var isReading = false
 
     private var endpoint: String {
         "\(connection.host):\(UInt16(clamping: connection.port))"
@@ -112,12 +114,17 @@ struct SchemaView: View {
             // window's initial layout costs more than into one already up.
             try? await Task.sleep(for: .zero)
             schema = cached
+        }
+        isReading = true
+        defer {
+            isReading = false
+            // Only once the fresh read is in: a jump to something just added
+            // to the schema wouldn't be found in the copy shown before it.
             applyPendingJump()
         }
         do {
             let fresh = try await fetchSchema(target)
             if fresh != schema { schema = fresh }
-            applyPendingJump()
         } catch {
             // A copy already showing is still the best there is.
             if schema == nil { loadError = "\(error)" }
@@ -125,7 +132,8 @@ struct SchemaView: View {
     }
 
     private func applyPendingJump() {
-        guard let request = coordinator.pending, request.endpoint == endpoint else { return }
+        guard schema != nil, !isReading,
+              let request = coordinator.pending, request.endpoint == endpoint else { return }
         switch request.target {
         case .attribute(let name):
             selectedTab = .attributes
