@@ -11,11 +11,13 @@ enum KeychainService {
     private static let sshService = "app.ldap-studio.ssh-password"
 
     /// What's been read or written this session, by service and account —
-    /// absent ones too. Every LDAP operation builds its target with the
-    /// connection's password, and a Keychain lookup is a round trip to
-    /// securityd that took about a millisecond on the main thread each
-    /// time; the Home list did one per row on every redraw. Writes below go
-    /// through it, so it never disagrees with what the app saved.
+    /// absent ones too, but not lookups that failed some other way (a locked
+    /// keychain, access denied), which are tried again next time. Every LDAP
+    /// operation builds its target with the connection's password, and a
+    /// Keychain lookup is a round trip to securityd that took about a
+    /// millisecond on the main thread each time; the Home list did one per
+    /// row on every redraw. Writes below go through it, so it never
+    /// disagrees with what the app saved.
     private static var cache: [String: String?] = [:]
 
     private static func cacheKey(_ service: String, _ id: UUID) -> String { "\(service)/\(id.uuidString)" }
@@ -49,7 +51,7 @@ enum KeychainService {
         var result: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         let password = (status == errSecSuccess ? result as? Data : nil).flatMap { String(data: $0, encoding: .utf8) }
-        cache[cacheKey(service, id)] = .some(password)
+        remember(password, status: status, service, id)
         return password
     }
 
@@ -91,10 +93,15 @@ enum KeychainService {
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: AnyObject?
-        let found = SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess
-        let value = (found ? result as? Data : nil).flatMap { String(data: $0, encoding: .utf8) }
-        cache[cacheKey(service, id)] = .some(value)
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        let value = (status == errSecSuccess ? result as? Data : nil).flatMap { String(data: $0, encoding: .utf8) }
+        remember(value, status: status, service, id)
         return value
+    }
+
+    private static func remember(_ value: String?, status: OSStatus, _ service: String, _ id: UUID) {
+        guard status == errSecSuccess || status == errSecItemNotFound else { return }
+        cache[cacheKey(service, id)] = .some(value)
     }
 
     private static func deleteSecret(service: String, id: UUID) {
