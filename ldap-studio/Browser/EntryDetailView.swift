@@ -131,15 +131,23 @@ struct EntryDetailLoader: View {
     let onChange: (DirectoryChange) async -> Void
 
     @State private var entry: DirectoryEntry?
-    /// `entry` is the copy kept from an earlier visit (see
-    /// DirectoryTree.viewedEntry), shown while it's read again.
-    @State private var isShowingViewedCopy = false
-    @State private var loadError: String?
+    /// Why the selected entry couldn't be read. Kept with its DN, so it's
+    /// never shown for another entry, and shown in place of whatever copy
+    /// of the entry is up — one from an earlier visit or an earlier read.
+    @State private var failure: (dn: String, message: String)?
     @State private var retryToken = 0
 
     var body: some View {
         Group {
-            if let current = entry, DN.same(current.dn, dn) || loadError == nil {
+            if let failure, DN.same(failure.dn, dn) {
+                ContentUnavailableView {
+                    Label("Couldn't Load Entry", systemImage: "exclamationmark.triangle")
+                } description: {
+                    Text(failure.message)
+                } actions: {
+                    Button("Try Again") { retryToken += 1 }
+                }
+            } else if let current = entry {
                 let isCurrent = DN.same(current.dn, dn)
                 // Not `Binding($entry)`: that force-unwraps.
                 EntryDetailView(
@@ -159,14 +167,6 @@ struct EntryDetailLoader: View {
                         PendingEntryVeil(name: DN.rdn(of: dn)).id(dn)
                     }
                 }
-            } else if let loadError {
-                ContentUnavailableView {
-                    Label("Couldn't Load Entry", systemImage: "exclamationmark.triangle")
-                } description: {
-                    Text(loadError)
-                } actions: {
-                    Button("Try Again") { retryToken += 1 }
-                }
             } else {
                 ProgressView("Loading \(DN.rdn(of: dn))…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -179,19 +179,17 @@ struct EntryDetailLoader: View {
 
     private func load() async {
         let dn = dn
-        loadError = nil
+        failure = nil
         // Seen earlier in this window: show that copy now, and the server's
         // current one as soon as it's read.
-        let isShowing = entry.map { DN.same($0.dn, dn) } ?? false
-        if !isShowing, let viewed = tree.viewedEntry(dn) {
+        if !(entry.map { DN.same($0.dn, dn) } ?? false), let viewed = tree.viewedEntry(dn) {
             entry = viewed
-            isShowingViewedCopy = true
         }
         do {
             let fetched = try await fetchEntry(connection.ldapTarget, dn: dn)
             guard !Task.isCancelled else { return }
             guard let fetched else {
-                failed("This entry no longer exists on the server.")
+                failure = (dn, "This entry no longer exists on the server.")
                 tree.entryRemoved(dn)
                 return
             }
@@ -199,22 +197,11 @@ struct EntryDetailLoader: View {
                                         hasChildren: tree.node(dn)?.mayHaveChildren ?? false)
             if let icon = tree.node(dn)?.icon { loaded.icon = icon }
             entry = loaded
-            isShowingViewedCopy = false
             tree.noteViewed(loaded)
         } catch is CancellationError {
         } catch {
             guard !Task.isCancelled else { return }
-            failed("\(error)")
-        }
-    }
-
-    /// An earlier visit's copy mustn't stand in for an entry that can't be
-    /// read now — show why instead.
-    private func failed(_ message: String) {
-        loadError = message
-        if isShowingViewedCopy {
-            entry = nil
-            isShowingViewedCopy = false
+            failure = (dn, "\(error)")
         }
     }
 }
@@ -346,10 +333,17 @@ struct EntryDetailView: View {
     private func loadOperational() async {
         guard showOperational, !entry.dn.isEmpty else {
             operationalRows = []
+            isLoadingOperational = false
             return
         }
+        // This view outlives a single entry (see EntryDetailLoader), so a
+        // read that's been superseded — cancelled by the next .task, or
+        // for an entry since replaced — must leave everything alone.
+        let dn = entry.dn
+        let userNames = Set(entry.attributes.map { $0.name.lowercased() })
+        func isCurrent() -> Bool { !Task.isCancelled && entry.dn == dn }
         isLoadingOperational = true
-        defer { isLoadingOperational = false }
+        defer { if isCurrent() { isLoadingOperational = false } }
         do {
             let results = try await searchDirectory(
                 host: connection.host,
@@ -360,17 +354,17 @@ struct EntryDetailView: View {
                 options: connection.ldapOptions,
                 bindDn: connection.bindDN,
                 password: password,
-                baseDn: entry.dn,
+                baseDn: dn,
                 scope: .base,
                 filter: "(objectClass=*)",
                 includeOperational: true
             )
-            let userNames = Set(entry.attributes.map { $0.name.lowercased() })
+            guard isCurrent() else { return }
             operationalRows = Attribute.rows((results.first?.attributes ?? [])
                 .filter { !userNames.contains($0.name.lowercased()) }, operational: true)
                 .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         } catch {
-            operationalRows = []
+            if isCurrent() { operationalRows = [] }
         }
     }
 
@@ -396,6 +390,9 @@ struct EntryDetailView: View {
             passwordPolicyRows = []
             return
         }
+        // As in loadOperational: a superseded read leaves the card alone.
+        let dn = entry.dn
+        func isCurrent() -> Bool { !Task.isCancelled && entry.dn == dn }
         do {
             let results = try await searchDirectory(
                 host: connection.host,
@@ -406,16 +403,17 @@ struct EntryDetailView: View {
                 options: connection.ldapOptions,
                 bindDn: connection.bindDN,
                 password: password,
-                baseDn: entry.dn,
+                baseDn: dn,
                 scope: .base,
                 filter: "(objectClass=*)",
                 includeOperational: true
             )
+            guard isCurrent() else { return }
             passwordPolicyRows = (results.first?.attributes ?? [])
                 .filter { Self.passwordPolicyAttributeNames.contains($0.name.lowercased()) }
                 .map { Attribute(name: $0.name, value: $0.value, isBinary: $0.isBinary, isOperational: true) }
         } catch {
-            passwordPolicyRows = []
+            if isCurrent() { passwordPolicyRows = [] }
         }
     }
 
