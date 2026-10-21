@@ -1007,7 +1007,7 @@ void ls_connection_mark_broken(LSConnection *conn) { conn->broken = true; }
 /* ── certificate probe (for the trust dialog) ─────────────────────── */
 
 /* An X509_NAME as a single RFC 2253-ish line. Caller frees. */
-static char *x509_name_string(X509_NAME *name) {
+static char *x509_name_string(const X509_NAME *name) {
   if (!name) return ls_xstrdup("");
   BIO *bio = BIO_new(BIO_s_mem());
   if (!bio) return ls_xstrdup("");
@@ -1110,8 +1110,8 @@ static int probe_certificate(const ConnPolicy *p, const char *host,
                    "could not parse the server certificate");
   }
 
-  X509_NAME *subject = X509_get_subject_name(cert);
-  X509_NAME *issuer = X509_get_issuer_name(cert);
+  const X509_NAME *subject = X509_get_subject_name(cert);
+  const X509_NAME *issuer = X509_get_issuer_name(cert);
   out->subject = x509_name_string(subject);
   out->issuer = x509_name_string(issuer);
   out->sha256 = x509_sha256_hex(cert);
@@ -1119,9 +1119,11 @@ static int probe_certificate(const ConnPolicy *p, const char *host,
   out->not_after = asn1_time_string(X509_get0_notAfter(cert));
   out->self_signed = X509_NAME_cmp(subject, issuer) == 0;
 
-  out->expired = false;
-  if (X509_cmp_current_time(X509_get0_notAfter(cert)) < 0) out->expired = true;
-  if (X509_cmp_current_time(X509_get0_notBefore(cert)) > 0) out->expired = true;
+  /* -1 / 1: before / after now; a time that can't be read (-2) isn't
+   * reported as expired. */
+  time_t now = time(NULL);
+  out->expired = ASN1_TIME_cmp_time_t(X509_get0_notAfter(cert), now) == -1 ||
+                 ASN1_TIME_cmp_time_t(X509_get0_notBefore(cert), now) == 1;
 
   out->host_mismatch = false;
   if (host && *host &&

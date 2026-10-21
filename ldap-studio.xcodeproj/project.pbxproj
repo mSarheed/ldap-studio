@@ -70,7 +70,6 @@
 				042AE3933026B0ED00251975 /* Frameworks */,
 				042AE3943026B0ED00251975 /* Resources */,
 				25D1BDBF4157D1BB77318400 /* Bundle Homebrew libraries */,
-				25D1BDBF4157D1BB77318401 /* Bundle libssh2 */,
 			);
 			buildRules = (
 			);
@@ -168,27 +167,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -e\nexport PATH=\"$PATH:/opt/homebrew/bin:/usr/bin\"\n\n# CA bundle for the bundled OpenSSL: the App Sandbox blocks its default\n# Homebrew cert path, so ship one in Resources for ls_set_tls_cacert().\nRES=\"${CODESIGNING_FOLDER_PATH}/Contents/Resources\"\nmkdir -p \"$RES\"\nCACERT=\"/opt/homebrew/etc/ca-certificates/cert.pem\"\n[ -f \"$CACERT\" ] || CACERT=\"$(brew --prefix openssl@3)/etc/openssl@3/cert.pem\"\nif [ -f \"$CACERT\" ]; then cp -f \"$CACERT\" \"$RES/openssl-cacert.pem\"; else echo \"warning: no CA bundle to embed - LDAPS will fail in the sandbox\" >&2; fi\n\n# SwiftUI Previews JIT-launch the app with DYLD_LIBRARY_PATH forced to\n# BUILT_PRODUCTS_DIR and /opt/homebrew sandboxed off, so the runtime\n# dylibs have to sit there too or every preview in the app target fails\n# to load (Library not loaded: .../libldap.2.dylib).\nif [ -n \"${BUILT_PRODUCTS_DIR}\" ]; then\n  _ol=\"$(brew --prefix openldap)\"; _os=\"$(brew --prefix openssl@3)\"; _lx=\"$(brew --prefix libxcrypt)\"\n  for _src in \"$_ol/lib/libldap.2.dylib\" \"$_ol/lib/liblber.2.dylib\" \"$_os/lib/libssl.3.dylib\" \"$_os/lib/libcrypto.3.dylib\" \"$_lx/lib/libcrypt.2.dylib\"; do\n    [ -f \"$_src\" ] && cp -f \"$_src\" \"${BUILT_PRODUCTS_DIR}/$(basename \"$_src\")\" || true\n  done\nfi\n\nif [ \"${CODE_SIGNING_ALLOWED}\" = \"NO\" ]; then echo \"note: code signing disabled - skipping dylib bundling\"; exit 0; fi\n\nFW=\"${CODESIGNING_FOLDER_PATH}/Contents/Frameworks\"\nEXE=\"${CODESIGNING_FOLDER_PATH}/Contents/MacOS/${EXECUTABLE_NAME}\"\nmkdir -p \"$FW\"\n\nOL=\"$(brew --prefix openldap)\"\nOS=\"$(brew --prefix openssl@3)\"\nLX=\"$(brew --prefix libxcrypt)\"\nDYLIBS=\"$OL/lib/libldap.2.dylib $OL/lib/liblber.2.dylib $OS/lib/libssl.3.dylib $OS/lib/libcrypto.3.dylib $LX/lib/libcrypt.2.dylib\"\n\nrepoint() {\n  otool -L \"$1\" | tail -n +2 | awk '{print $1}' | while read dep; do\n    case \"$dep\" in\n      /opt/homebrew/*|/usr/local/*) install_name_tool -change \"$dep\" \"@rpath/$(basename \"$dep\")\" \"$1\" ;;\n    esac\n  done\n}\n\nfor src in $DYLIBS; do\n  base=\"$(basename \"$src\")\"\n  cp -f \"$src\" \"$FW/$base\"\n  chmod u+w \"$FW/$base\"\n  # Drop Homebrew's ad-hoc signature first so install_name_tool has\n  # nothing to invalidate (Xcode warns otherwise); we re-sign below.\n  codesign --remove-signature \"$FW/$base\" 2>/dev/null || true\n  install_name_tool -id \"@rpath/$base\" \"$FW/$base\"\n  repoint \"$FW/$base\"\ndone\n\nrepoint \"$EXE\"\n\nIDENT=\"${EXPANDED_CODE_SIGN_IDENTITY:--}\"\nfor src in $DYLIBS; do\n  codesign --force --sign \"$IDENT\" --options runtime --timestamp=none \"$FW/$(basename \"$src\")\"\ndone\n";
-			showEnvVarsInLog = 0;
-		};
-		25D1BDBF4157D1BB77318401 /* Bundle libssh2 */ = {
-			isa = PBXShellScriptBuildPhase;
-			alwaysOutOfDate = 1;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			inputFileListPaths = (
-			);
-			inputPaths = (
-			);
-			name = "Bundle libssh2";
-			outputFileListPaths = (
-			);
-			outputPaths = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-			shellPath = /bin/sh;
-			shellScript = "set -e\nexport PATH=\"$PATH:/opt/homebrew/bin:/usr/bin\"\nSSH=\"$(brew --prefix libssh2)\"\nSRC=\"$SSH/lib/libssh2.1.dylib\"\n[ -f \"$SRC\" ] || { echo \"error: libssh2 is missing; run brew bundle\" >&2; exit 1; }\nif [ -n \"${BUILT_PRODUCTS_DIR}\" ]; then cp -f \"$SRC\" \"${BUILT_PRODUCTS_DIR}/libssh2.1.dylib\"; fi\nif [ \"${CODE_SIGNING_ALLOWED}\" = \"NO\" ]; then exit 0; fi\nFW=\"${CODESIGNING_FOLDER_PATH}/Contents/Frameworks\"\nmkdir -p \"$FW\"\ncp -f \"$SRC\" \"$FW/libssh2.1.dylib\"\nchmod u+w \"$FW/libssh2.1.dylib\"\ncodesign --remove-signature \"$FW/libssh2.1.dylib\" 2>/dev/null || true\ninstall_name_tool -id \"@rpath/libssh2.1.dylib\" \"$FW/libssh2.1.dylib\"\notool -L \"$FW/libssh2.1.dylib\" | tail -n +2 | awk '{print $1}' | while read dep; do case \"$dep\" in /opt/homebrew/*|/usr/local/*) install_name_tool -change \"$dep\" \"@rpath/$(basename \"$dep\")\" \"$FW/libssh2.1.dylib\" ;; esac; done\nIDENT=\"${EXPANDED_CODE_SIGN_IDENTITY:--}\"\ncodesign --force --sign \"$IDENT\" --options runtime --timestamp=none \"$FW/libssh2.1.dylib\"\n";
+			shellScript = "set -e\nexport PATH=\"$PATH:/opt/homebrew/bin:/usr/bin\"\n\n# CA bundle for the bundled OpenSSL: the App Sandbox blocks its default\n# Homebrew cert path, so ship one in Resources for ls_set_tls_cacert().\nRES=\"${CODESIGNING_FOLDER_PATH}/Contents/Resources\"\nmkdir -p \"$RES\"\nCACERT=\"/opt/homebrew/etc/ca-certificates/cert.pem\"\n[ -f \"$CACERT\" ] || CACERT=\"$(brew --prefix openssl@4)/etc/openssl@4/cert.pem\"\nif [ -f \"$CACERT\" ]; then cp -f \"$CACERT\" \"$RES/openssl-cacert.pem\"; else echo \"warning: no CA bundle to embed - LDAPS will fail in the sandbox\" >&2; fi\n\nEXE=\"${CODESIGNING_FOLDER_PATH}/Contents/MacOS/${EXECUTABLE_NAME}\"\n\n# Every Homebrew library the app needs, found by following what links what\n# from the executable down rather than from a list kept by hand: when\n# Homebrew moved openldap and libssh2 to a new OpenSSL, a hand-kept list\n# left it out and the app crashed at launch. A dependency already pointed\n# at @rpath (by an earlier build) is looked up in the library search paths.\nresolve() {\n  case \"$1\" in\n    /opt/homebrew/*|/usr/local/*) echo \"$1\" ;;\n    @rpath/*)\n      for dir in $LIBRARY_SEARCH_PATHS; do\n        case \"$dir\" in /opt/homebrew/*|/usr/local/*) ;; *) continue ;; esac\n        if [ -f \"$dir/${1#@rpath/}\" ]; then echo \"$dir/${1#@rpath/}\"; return; fi\n      done ;;\n  esac\n}\ndeps() {\n  otool -L \"$1\" | tail -n +2 | awk '{print $1}' | while read -r dep; do resolve \"$dep\" || true; done\n}\nDYLIBS=\"\"\nNAMES=\" \"\nqueue=\"$(deps \"$EXE\")\"\nwhile [ -n \"$queue\" ]; do\n  next=\"\"\n  for dep in $queue; do\n    base=\"$(basename \"$dep\")\"\n    case \"$NAMES\" in *\" $base \"*) continue ;; esac\n    NAMES=\"$NAMES$base \"\n    DYLIBS=\"$DYLIBS $dep\"\n    next=\"$next $(deps \"$dep\")\"\n  done\n  queue=\"$next\"\ndone\n[ -n \"$DYLIBS\" ] || { echo \"error: found no Homebrew libraries linked into $EXE\" >&2; exit 1; }\n\n# SwiftUI Previews JIT-launch the app with DYLD_LIBRARY_PATH forced to\n# BUILT_PRODUCTS_DIR and /opt/homebrew sandboxed off, so the runtime\n# dylibs have to sit there too or every preview in the app target fails\n# to load (Library not loaded: .../libldap.2.dylib).\nif [ -n \"${BUILT_PRODUCTS_DIR}\" ]; then\n  for src in $DYLIBS; do cp -f \"$src\" \"${BUILT_PRODUCTS_DIR}/$(basename \"$src\")\" || true; done\nfi\n\nif [ \"${CODE_SIGNING_ALLOWED}\" = \"NO\" ]; then echo \"note: code signing disabled - skipping dylib bundling\"; exit 0; fi\n\nFW=\"${CODESIGNING_FOLDER_PATH}/Contents/Frameworks\"\nmkdir -p \"$FW\"\n\n# Drop libraries an earlier build bundled that nothing needs any more (an\n# OpenSSL the dependencies have moved on from, say).\nfor old in \"$FW\"/*.dylib; do\n  [ -f \"$old\" ] || continue\n  case \"$NAMES\" in *\" $(basename \"$old\") \"*) ;; *) rm -f \"$old\" ;; esac\ndone\n\nrepoint() {\n  otool -L \"$1\" | tail -n +2 | awk '{print $1}' | while read -r dep; do\n    case \"$dep\" in\n      /opt/homebrew/*|/usr/local/*) install_name_tool -change \"$dep\" \"@rpath/$(basename \"$dep\")\" \"$1\" ;;\n    esac\n  done\n}\n\nfor src in $DYLIBS; do\n  base=\"$(basename \"$src\")\"\n  cp -f \"$src\" \"$FW/$base\"\n  chmod u+w \"$FW/$base\"\n  # Drop Homebrew's ad-hoc signature first so install_name_tool has\n  # nothing to invalidate (Xcode warns otherwise); we re-sign below.\n  codesign --remove-signature \"$FW/$base\" 2>/dev/null || true\n  install_name_tool -id \"@rpath/$base\" \"$FW/$base\"\n  repoint \"$FW/$base\"\ndone\n\nrepoint \"$EXE\"\n\n# Fail the build, not the launch: nothing may still load from Homebrew, and\n# only one OpenSSL may be bundled (see the check in core/Makefile).\nfor bin in \"$EXE\" \"$FW\"/*.dylib; do\n  if otool -L \"$bin\" | tail -n +2 | awk '{print $1}' | grep -qE '^(/opt/homebrew|/usr/local)/'; then\n    echo \"error: $(basename \"$bin\") still loads a library from Homebrew rather than the app bundle\" >&2\n    exit 1\n  fi\ndone\nif [ \"$(ls \"$FW\" | grep -cE '^libcrypto\\.[0-9]+\\.dylib$')\" -gt 1 ]; then\n  echo \"error: more than one OpenSSL bundled ($(ls \"$FW\" | grep -E '^lib(ssl|crypto)\\.' | tr '\\n' ' ')) - the core and Homebrew's openldap/libssh2 must use the same one; see core/Makefile\" >&2\n  exit 1\nfi\n\nIDENT=\"${EXPANDED_CODE_SIGN_IDENTITY:--}\"\nfor src in $DYLIBS; do\n  codesign --force --sign \"$IDENT\" --options runtime --timestamp=none \"$FW/$(basename \"$src\")\"\ndone\n";
 			showEnvVarsInLog = 0;
 		};
 /* End PBXShellScriptBuildPhase section */
@@ -355,7 +334,7 @@
 				LIBRARY_SEARCH_PATHS = (
 					"$(SRCROOT)/core/build",
 					/opt/homebrew/opt/openldap/lib,
-					"/opt/homebrew/opt/openssl@3/lib",
+					"/opt/homebrew/opt/openssl@4/lib",
 					/opt/homebrew/opt/libxcrypt/lib,
 					/opt/homebrew/opt/libssh2/lib,
 				);
@@ -413,7 +392,7 @@
 				LIBRARY_SEARCH_PATHS = (
 					"$(SRCROOT)/core/build",
 					/opt/homebrew/opt/openldap/lib,
-					"/opt/homebrew/opt/openssl@3/lib",
+					"/opt/homebrew/opt/openssl@4/lib",
 					/opt/homebrew/opt/libxcrypt/lib,
 					/opt/homebrew/opt/libssh2/lib,
 				);
