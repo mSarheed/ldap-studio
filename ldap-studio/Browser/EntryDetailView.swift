@@ -340,9 +340,8 @@ struct EntryDetailView: View {
                 includeOperational: true
             )
             let userNames = Set(entry.attributes.map { $0.name.lowercased() })
-            operationalRows = (results.first?.attributes ?? [])
-                .filter { !userNames.contains($0.name.lowercased()) }
-                .map { Attribute(name: $0.name, value: $0.value, isBinary: $0.isBinary, isOperational: true) }
+            operationalRows = Attribute.rows((results.first?.attributes ?? [])
+                .filter { !userNames.contains($0.name.lowercased()) }, operational: true)
                 .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         } catch {
             operationalRows = []
@@ -560,6 +559,15 @@ struct EntryDetailView: View {
             showOperational = false
             operationalRows = []
             passwordPolicyRows = []
+        }
+        .onChange(of: entry.attributes) { old, new in
+            // Rows are identified by position (see Attribute.rows), so once
+            // a write is read back the selected row may hold another value
+            // — don't carry the selection over to it.
+            guard let selection else { return }
+            if old.first(where: { $0.id == selection }) != new.first(where: { $0.id == selection }) {
+                self.selection = nil
+            }
         }
         .task(id: operationalFetchKey) { await loadOperational() }
         .task(id: passwordPolicyFetchKey) { await loadPasswordPolicy() }

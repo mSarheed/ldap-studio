@@ -24,7 +24,9 @@ struct DirectoryEntry: Identifiable, Hashable {
 }
 
 struct Attribute: Identifiable, Hashable {
-    let id = UUID()
+    /// For an entry read from the server, the name and which of its values
+    /// this is ("mail#1") — see `DirectoryEntry.init(ldapEntry:)`.
+    var id: String = UUID().uuidString
     var name: String
     var value: String
     var isBinary: Bool = false
@@ -38,6 +40,24 @@ struct Attribute: Identifiable, Hashable {
     var decodedImage: NSImage? {
         guard isBinary, let data = Data(base64Encoded: value) else { return nil }
         return NSImage(data: data)
+    }
+}
+
+extension Attribute {
+    /// Table rows for an entry's attributes, identified by name and
+    /// position among that name's values rather than afresh each time it's
+    /// read. Moving from one entry to a similar one (user to user) then
+    /// updates the detail table's rows in place instead of removing every
+    /// row and inserting new ones, and re-reading an entry keeps its rows.
+    static func rows(_ attributes: [LdapAttribute], operational: Bool = false) -> [Attribute] {
+        var seen: [String: Int] = [:]
+        return attributes.map { attribute in
+            let name = attribute.name.lowercased()
+            let index = seen[name, default: 0]
+            seen[name] = index + 1
+            return Attribute(id: "\(operational ? "+" : "")\(name)#\(index)", name: attribute.name,
+                             value: attribute.value, isBinary: attribute.isBinary, isOperational: operational)
+        }
     }
 }
 
@@ -61,7 +81,7 @@ extension DirectoryEntry {
             icon: DirectoryEntry.icon(forObjectClasses: entry.values("objectClass"),
                                       univentionType: entry.values("univentionObjectType").first,
                                       hasChildren: hasChildren),
-            attributes: entry.attributes.map { Attribute(name: $0.name, value: $0.value, isBinary: $0.isBinary) }
+            attributes: Attribute.rows(entry.attributes)
         )
     }
 
