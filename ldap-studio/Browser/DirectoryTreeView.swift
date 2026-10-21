@@ -1116,7 +1116,9 @@ private struct TreeNodeRow: View {
 
     /// Only rows that can have children take drops. A drop target is most
     /// of what a row costs SwiftUI to set up as it scrolls into view, and
-    /// leaf rows (users, groups) are the bulk of any large branch.
+    /// leaf rows (users, groups) are the bulk of any large branch — so they
+    /// aren't drop targets, though the server would accept children under
+    /// them; the rare move there goes through Move to… instead.
     @ViewBuilder
     private var droppableRowLabel: some View {
         if node.acceptsDrops || node.showsDisclosure {

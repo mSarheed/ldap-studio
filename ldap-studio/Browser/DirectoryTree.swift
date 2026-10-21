@@ -46,6 +46,9 @@ final class TreeNode: Identifiable {
     /// Whether entries may be moved under this one by dropping them on its
     /// row: anything not a leaf by its object classes (an empty OU is still
     /// a container), plus whatever turns out to have children anyway.
+    /// LDAP itself would let a user or group have children too; leaving
+    /// those rows out is a deliberate trade for scrolling (see
+    /// TreeNodeRow.droppableRowLabel), and Move to… still reaches them.
     private(set) var acceptsDrops: Bool
 
     var isExpanded = false
