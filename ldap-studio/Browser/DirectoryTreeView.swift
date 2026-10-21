@@ -1039,17 +1039,12 @@ private struct TreeNodeRow: View {
                 }
                 statusRow
             } label: {
-                // Only rows that can have children take drops. A drop
-                // target is most of what a row costs SwiftUI to set up as
-                // it scrolls into view, and leaf rows (users, groups) are
-                // the bulk of any large branch.
-                rowLabel
-                    .modifier(TreeDropTarget(node: node, context: context))
+                droppableRowLabel
                     .tag(node.id)
             }
             .id(node.id)
         } else {
-            rowLabel
+            droppableRowLabel
                 .tag(node.id)
                 .id(node.id)
         }
@@ -1110,6 +1105,18 @@ private struct TreeNodeRow: View {
         case .loaded: return " (\(node.children.count.formatted()))"
         case .loading where node.loadedCount > 0: return " (\(node.loadedCount.formatted())…)"
         default: return ""
+        }
+    }
+
+    /// Only rows that can have children take drops. A drop target is most
+    /// of what a row costs SwiftUI to set up as it scrolls into view, and
+    /// leaf rows (users, groups) are the bulk of any large branch.
+    @ViewBuilder
+    private var droppableRowLabel: some View {
+        if node.acceptsDrops || node.showsDisclosure {
+            rowLabel.modifier(TreeDropTarget(node: node, context: context))
+        } else {
+            rowLabel
         }
     }
 

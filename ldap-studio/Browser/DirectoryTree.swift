@@ -43,6 +43,10 @@ final class TreeNode: Identifiable {
     /// says this entry may have children — what decides the expand arrow
     /// before the children have been read.
     private(set) var mayHaveChildren: Bool
+    /// Whether entries may be moved under this one by dropping them on its
+    /// row: anything not a leaf by its object classes (an empty OU is still
+    /// a container), plus whatever turns out to have children anyway.
+    private(set) var acceptsDrops: Bool
 
     var isExpanded = false
     fileprivate(set) var childrenState: Children = .notLoaded
@@ -79,6 +83,7 @@ final class TreeNode: Identifiable {
         sortKey = row.sortKey
         objectClasses = row.objectClasses
         mayHaveChildren = row.mayHaveChildren
+        acceptsDrops = row.acceptsDrops
         icon = row.icon
     }
 
@@ -90,6 +95,7 @@ final class TreeNode: Identifiable {
         // Assign only what changed: every assignment notifies observers.
         if objectClasses != row.objectClasses { objectClasses = row.objectClasses }
         if mayHaveChildren != row.mayHaveChildren { mayHaveChildren = row.mayHaveChildren }
+        if acceptsDrops != row.acceptsDrops { acceptsDrops = row.acceptsDrops }
         if icon != row.icon { icon = row.icon }
     }
 
@@ -100,6 +106,7 @@ final class TreeNode: Identifiable {
     /// Marks that a child was just created under this entry.
     fileprivate func noteHasChildren() {
         if !mayHaveChildren { mayHaveChildren = true }
+        if !acceptsDrops { acceptsDrops = true }
     }
 
     /// Whether to draw an expand arrow: until the children have been read
@@ -151,6 +158,7 @@ nonisolated struct TreeRow: Sendable {
     let sortKey: String
     let objectClasses: [String]
     let mayHaveChildren: Bool
+    let acceptsDrops: Bool
     let icon: String
 
     init(_ entry: LdapEntry) {
@@ -160,6 +168,7 @@ nonisolated struct TreeRow: Sendable {
         sortKey = name.lowercased()
         objectClasses = entry.values("objectClass")
         mayHaveChildren = TreeRow.mayHaveChildren(entry)
+        acceptsDrops = mayHaveChildren || !TreeRow.isLeaf(objectClasses: objectClasses)
         icon = TreeRow.icon(for: entry, mayHaveChildren: mayHaveChildren)
     }
 
@@ -213,10 +222,14 @@ nonisolated struct TreeRow: Sendable {
         if let count = entry.values("msDS-Approx-Immed-Subordinates").first.flatMap(Int.init) {
             return count > 0
         }
-        let classes = Set(entry.values("objectClass").map { $0.lowercased() })
-        if !classes.isDisjoint(with: containerClasses) { return true }
-        if !classes.isDisjoint(with: leafClasses) { return false }
-        return true
+        return !isLeaf(objectClasses: entry.values("objectClass"))
+    }
+
+    /// What mayHaveChildren falls back on: a leaf class, and no container
+    /// class to say otherwise.
+    static func isLeaf(objectClasses: [String]) -> Bool {
+        let classes = Set(objectClasses.map { $0.lowercased() })
+        return classes.isDisjoint(with: containerClasses) && !classes.isDisjoint(with: leafClasses)
     }
 
     static func icon(for entry: LdapEntry, mayHaveChildren: Bool) -> String {
