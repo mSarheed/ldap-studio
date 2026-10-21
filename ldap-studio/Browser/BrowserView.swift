@@ -48,15 +48,12 @@ struct BrowserView: View {
     /// suggestions rather than the whole browser failing to open.
     @State private var schema: LdapSchema?
 
-    @State private var isLogExpanded = false
-    @State private var operationLog = OperationLog.shared
-
     private var endpoint: String { connection.endpoint }
 
     var body: some View {
         VStack(spacing: 0) {
             content
-            logStrip
+            OperationLogStrip(endpoint: endpoint)
         }
         .branchOperations(operations)
         .onDisappear { tree.cancelAll() }
@@ -214,62 +211,6 @@ struct BrowserView: View {
                 \(SSHHostKeyFingerprint.openSSH(fromHex: pending.fingerprint))
                 """)
         }
-    }
-
-    private var logStrip: some View {
-        let mine = operationLog.entries.filter { $0.endpoint == endpoint }
-        return VStack(spacing: 0) {
-            Divider()
-
-            Button {
-                withAnimation(.easeOut(duration: 0.15)) { isLogExpanded.toggle() }
-            } label: {
-                HStack(spacing: 7) {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 10, weight: .semibold))
-                        .rotationEffect(.degrees(isLogExpanded ? 90 : 0))
-                        .foregroundStyle(.secondary)
-                    Image(systemName: "list.bullet.rectangle")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text("Operation Log")
-                        .font(.caption.weight(.semibold))
-                    if !mine.isEmpty {
-                        Text("\(mine.count)")
-                            .font(.caption2.weight(.medium).monospacedDigit())
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1)
-                            .background(.quaternary, in: Capsule())
-                    }
-                    if let last = mine.last {
-                        Text("·").foregroundStyle(.tertiary)
-                        Text(last.summary)
-                            .foregroundStyle(last.outcome.isOK ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.red))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
-                    Spacer(minLength: 8)
-                    Text("⇧⌘Y")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                }
-                .font(.caption)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .keyboardShortcut("y", modifiers: [.command, .shift])
-
-            if isLogExpanded {
-                Divider()
-                OperationLogPanel(endpoint: endpoint)
-                    .frame(height: 220)
-            }
-        }
-        .background(.bar)
     }
 
     private func retry() {
@@ -430,6 +371,73 @@ struct BrowserView: View {
         } else {
             selection = nil
         }
+    }
+}
+
+/// The Operation Log's summary line under the browser, expanding into the
+/// full log. A view of its own so that only it redraws as operations are
+/// logged — every search adds a row, and the browser around it shouldn't
+/// be rebuilt each time.
+private struct OperationLogStrip: View {
+    let endpoint: String
+
+    @State private var isExpanded = false
+    private let operationLog = OperationLog.shared
+
+    var body: some View {
+        let mine = operationLog.entries.filter { $0.endpoint == endpoint }
+        return VStack(spacing: 0) {
+            Divider()
+
+            Button {
+                withAnimation(.easeOut(duration: 0.15)) { isExpanded.toggle() }
+            } label: {
+                HStack(spacing: 7) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                        .foregroundStyle(.secondary)
+                    Image(systemName: "list.bullet.rectangle")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("Operation Log")
+                        .font(.caption.weight(.semibold))
+                    if !mine.isEmpty {
+                        Text("\(mine.count)")
+                            .font(.caption2.weight(.medium).monospacedDigit())
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(.quaternary, in: Capsule())
+                    }
+                    if let last = mine.last {
+                        Text("·").foregroundStyle(.tertiary)
+                        Text(last.summary)
+                            .foregroundStyle(last.outcome.isOK ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.red))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    Spacer(minLength: 8)
+                    Text("⇧⌘Y")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+                .font(.caption)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .keyboardShortcut("y", modifiers: [.command, .shift])
+
+            if isExpanded {
+                Divider()
+                OperationLogPanel(endpoint: endpoint)
+                    .frame(height: 220)
+            }
+        }
+        .background(.bar)
     }
 }
 
