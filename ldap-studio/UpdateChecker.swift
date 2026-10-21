@@ -109,12 +109,19 @@ final class UpdateChecker {
     // MARK: - Network
 
     /// The newest release on the channel, or nil when it has none yet.
-    /// `releases/latest` is GitHub's newest non-pre-release; betas need the
-    /// list, newest first, from which the highest version wins.
+    /// `releases/latest` is GitHub's newest non-pre-release; with betas, the
+    /// highest version in the whole list wins.
     private func fetchNewest(includingBetas: Bool) async throws -> Release? {
         if includingBetas {
-            let releases: [Release]? = try await get("releases?per_page=30")
-            return releases?
+            // Every page: the list is newest-published first, which needn't
+            // be highest-versioned first.
+            var releases: [Release] = []
+            for page in 1...10 {
+                let batch: [Release] = try await get("releases?per_page=100&page=\(page)") ?? []
+                releases += batch
+                if batch.count < 100 { break }
+            }
+            return releases
                 .filter { $0.draft != true }
                 .compactMap { release in AppVersion(release.tagName).map { (release, $0) } }
                 .max { $0.1 < $1.1 }?.0
