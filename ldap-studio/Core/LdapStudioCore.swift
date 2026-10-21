@@ -797,10 +797,10 @@ public func searchDirectory(host: String, port: UInt16, useSsl: Bool,
 }
 
 /// The schema last read for each target this session. A directory's
-/// schema hardly ever changes, yet the browser (for autocomplete), the
-/// Schema window and Edit Entry each read it when they open — on a large
-/// directory, most of what opening them costs. They show this copy at once
-/// and read it again behind it.
+/// schema hardly ever changes, yet the browser reads it (for autocomplete)
+/// and then the Schema window reads it again when it opens — on a large
+/// directory, most of what opening that costs. The Schema window shows this
+/// copy at once and reads it again behind it.
 private var schemaCache: [LdapTarget: LdapSchema] = [:]
 
 public func cachedSchema(_ target: LdapTarget) -> LdapSchema? {
