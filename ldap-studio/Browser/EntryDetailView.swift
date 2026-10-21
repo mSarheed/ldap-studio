@@ -150,7 +150,8 @@ struct EntryDetailLoader: View {
                     isBookmarked: isBookmarked,
                     onToggleBookmark: onToggleBookmark,
                     operations: operations,
-                    onChange: onChange
+                    onChange: onChange,
+                    isStandingIn: !isCurrent
                 )
                 .disabled(!isCurrent)
                 .overlay {
@@ -256,6 +257,9 @@ struct EntryDetailView: View {
     /// straight to LDAP, and the tree node and this view are then re-read
     /// from there rather than patched locally.
     let onChange: (DirectoryChange) async -> Void
+    /// Another entry is loading, and this one is only still showing until it
+    /// arrives (see EntryDetailLoader) — nothing in the menus may act on it.
+    var isStandingIn = false
 
     @State private var sortOrder = [KeyPathComparator(\Attribute.name)]
     @State private var selection: Attribute.ID?
@@ -672,7 +676,7 @@ struct EntryDetailView: View {
         } message: { message in
             Text(message)
         }
-        .focusedSceneValue(\.entryDetailCommands, EntryDetailCommands(
+        .focusedSceneValue(\.entryDetailCommands, isStandingIn ? nil : EntryDetailCommands(
             addAttribute: { isShowingAddAttribute = true },
             editAttribute: (!isReadOnly && selectedAttribute?.isBinary == false && selectedAttribute?.isOperational == false)
                 ? { beginEdit(selectedAttribute) } : nil,
