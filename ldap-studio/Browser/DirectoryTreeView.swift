@@ -251,19 +251,29 @@ struct DirectoryTreeView: View {
             .onChange(of: treeSelection) { oldValue, newValue in
                 rowContext.selection = newValue
                 if let added = newValue.subtracting(oldValue).first {
+                    rowContext.pickedInList = added
                     selection = added
                 } else if let selection, !newValue.contains(selection) {
+                    rowContext.pickedInList = newValue.first
                     self.selection = newValue.first
                 } else if newValue.isEmpty {
+                    rowContext.pickedInList = nil
                     selection = nil
                 }
             }
             .onChange(of: selection) { _, newValue in
                 guard let newValue else {
+                    rowContext.pickedInList = nil
                     treeSelection.removeAll()
                     return
                 }
-                if !treeSelection.contains(newValue), tree.node(newValue) != nil {
+                // A row clicked (or arrowed to) is already on screen; only a
+                // selection made elsewhere — Go to DN, a search result, a
+                // bookmark — needs selecting in the list and scrolling to.
+                // Animating that scroll on every click also cost more than
+                // the rest of the click put together.
+                guard newValue != rowContext.pickedInList else { return }
+                if tree.node(newValue) != nil {
                     treeSelection = [newValue]
                 }
                 withAnimation {
@@ -939,13 +949,24 @@ struct DirectoryTreeView: View {
             isRevealing = true
             defer { isRevealing = false }
             do {
-                let resolved = try await tree.reveal(dn)
-                selection = resolved
-                treeSelection = [resolved]
+                select(try await tree.reveal(dn))
             } catch is CancellationError {
             } catch {
                 actionError = error.localizedDescription
             }
+        }
+    }
+
+    /// Selects a revealed entry. A new selection is selected in the list
+    /// and scrolled to by onChange(of: selection); setting the list's
+    /// selection here too would make it look like a click, which isn't
+    /// scrolled to. One that's already selected (a search hit) just needs
+    /// its row selected now that the tree shows it.
+    private func select(_ dn: String) {
+        if selection == dn {
+            treeSelection = [dn]
+        } else {
+            selection = dn
         }
     }
 
@@ -966,9 +987,7 @@ struct DirectoryTreeView: View {
             isRevealing = true
             defer { isRevealing = false }
             do {
-                let resolved = try await tree.reveal(trimmed)
-                selection = resolved
-                treeSelection = [resolved]
+                select(try await tree.reveal(trimmed))
                 isShowingGoTo = false
                 goToText = ""
             } catch {
@@ -989,6 +1008,9 @@ final class TreeRowContext {
     /// The tree's current selection — read only when a drag starts, so
     /// not observed.
     @ObservationIgnored var selection: Set<String> = []
+    /// The entry last selected by clicking in the list, which therefore
+    /// needs no scrolling to.
+    @ObservationIgnored var pickedInList: String?
     @ObservationIgnored var onDrop: ([String], String) -> Void = { _, _ in }
 
     /// A drag carries the whole selection if it started on a selected row.
