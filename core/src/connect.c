@@ -44,17 +44,24 @@ static double monotonic_seconds(void) {
 /* Backs run_with_deadline below. */
 typedef struct {
   LDAP *ld;
-  double deadline;
-  volatile bool call_done;
+  struct timespec deadline; /* CLOCK_REALTIME, for pthread_cond_timedwait */
+  pthread_mutex_t lock;
+  pthread_cond_t cond;
+  bool call_done; /* protected by lock */
 } ConnectDeadline;
 
+/* Waits for the call to finish or the deadline to pass, whichever comes
+ * first. It's woken the moment the call returns, so a connect that
+ * succeeds isn't held up joining this thread. */
 static void *connect_deadline_watch(void *arg) {
   ConnectDeadline *w = arg;
-  while (!w->call_done && monotonic_seconds() < w->deadline) {
-    struct timespec nap = {0, 20L * 1000 * 1000}; /* 20ms */
-    nanosleep(&nap, NULL);
-  }
-  if (!w->call_done) {
+  pthread_mutex_lock(&w->lock);
+  int wait_rc = 0;
+  while (!w->call_done && wait_rc == 0)
+    wait_rc = pthread_cond_timedwait(&w->cond, &w->lock, &w->deadline);
+  bool call_done = w->call_done;
+  pthread_mutex_unlock(&w->lock);
+  if (!call_done) {
     /* The deadline passed and fn() (running on the caller's thread) still
      * hasn't returned. The fd only exists once fn() actually starts
      * connecting, so it's fetched here rather than up front. Shutting it
@@ -94,18 +101,23 @@ static void *connect_deadline_watch(void *arg) {
  * reports as a timeout. */
 static int run_with_deadline(LDAP *ld, unsigned timeout_seconds,
                              int (*fn)(LDAP *)) {
-  ConnectDeadline w = {
-      .ld = ld,
-      .deadline = monotonic_seconds() + (double)timeout_seconds,
-      .call_done = false,
-  };
+  ConnectDeadline w = {.ld = ld, .call_done = false};
+  clock_gettime(CLOCK_REALTIME, &w.deadline);
+  w.deadline.tv_sec += (time_t)timeout_seconds;
+  pthread_mutex_init(&w.lock, NULL);
+  pthread_cond_init(&w.cond, NULL);
   pthread_t thread;
   bool watching =
       pthread_create(&thread, NULL, connect_deadline_watch, &w) == 0;
 
   int rc = fn(ld);
+  pthread_mutex_lock(&w.lock);
   w.call_done = true;
+  pthread_cond_signal(&w.cond);
+  pthread_mutex_unlock(&w.lock);
   if (watching) pthread_join(thread, NULL);
+  pthread_cond_destroy(&w.cond);
+  pthread_mutex_destroy(&w.lock);
   return rc;
 }
 
