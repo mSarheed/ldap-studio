@@ -34,8 +34,7 @@ enum KeychainService {
 
         var newItem = query
         newItem[kSecValueData as String] = Data(password.utf8)
-        SecItemAdd(newItem as CFDictionary, nil)
-        cache[cacheKey(service, id)] = password
+        rememberWrite(password, status: SecItemAdd(newItem as CFDictionary, nil), service, id)
     }
 
     static func readPassword(for id: UUID) -> String? {
@@ -61,8 +60,7 @@ enum KeychainService {
             kSecAttrService as String: service,
             kSecAttrAccount as String: id.uuidString,
         ]
-        SecItemDelete(query as CFDictionary)
-        cache[cacheKey(service, id)] = .some(nil)
+        rememberWrite(nil, status: SecItemDelete(query as CFDictionary), service, id)
         deleteSecret(service: sshService, id: id)
     }
 
@@ -81,8 +79,7 @@ enum KeychainService {
         SecItemDelete(query as CFDictionary)
         var item = query
         item[kSecValueData as String] = Data(value.utf8)
-        SecItemAdd(item as CFDictionary, nil)
-        cache[cacheKey(service, id)] = value
+        rememberWrite(value, status: SecItemAdd(item as CFDictionary, nil), service, id)
     }
 
     private static func readSecret(service: String, id: UUID) -> String? {
@@ -104,11 +101,22 @@ enum KeychainService {
         cache[cacheKey(service, id)] = .some(value)
     }
 
+    /// After a save (`value`) or delete (nil): remember the outcome only if
+    /// the Keychain took it — deleting one that wasn't there counts — and
+    /// otherwise forget what's cached, so the next read asks the Keychain
+    /// what it actually holds.
+    private static func rememberWrite(_ value: String?, status: OSStatus, _ service: String, _ id: UUID) {
+        if status == errSecSuccess || (value == nil && status == errSecItemNotFound) {
+            cache[cacheKey(service, id)] = .some(value)
+        } else {
+            cache.removeValue(forKey: cacheKey(service, id))
+        }
+    }
+
     private static func deleteSecret(service: String, id: UUID) {
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
                                     kSecAttrService as String: service,
                                     kSecAttrAccount as String: id.uuidString]
-        SecItemDelete(query as CFDictionary)
-        cache[cacheKey(service, id)] = .some(nil)
+        rememberWrite(nil, status: SecItemDelete(query as CFDictionary), service, id)
     }
 }
