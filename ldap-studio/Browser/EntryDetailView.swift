@@ -565,7 +565,9 @@ struct EntryDetailView: View {
                                 .foregroundStyle(attribute.isOperational ? .secondary : .primary)
                         }
                     }
-                    .overlay(DoubleClickObserver { attributeBeingViewed = attribute })
+                    // A raw event monitor, so it doesn't see .disabled — an
+                    // entry only standing in mustn't open anything either.
+                    .overlay(DoubleClickObserver { if !isStandingIn { attributeBeingViewed = attribute } })
                 }
             }
             .contextMenu(forSelectionType: Attribute.ID.self) { ids in
@@ -583,6 +585,10 @@ struct EntryDetailView: View {
             showOperational = false
             operationalRows = []
             passwordPolicyRows = []
+            attributeBeingViewed = nil
+            attributeBeingEdited = nil
+            attributePendingDeletion = nil
+            attributeBeingPasswordSet = nil
         }
         .onChange(of: entry.attributes) { old, new in
             // Rows are identified by position (see Attribute.rows), so once
