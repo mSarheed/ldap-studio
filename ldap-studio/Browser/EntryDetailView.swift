@@ -111,8 +111,13 @@ private struct PasswordPolicyCard: View {
 
 /// Reads the selected entry's full attributes (binary values and photos
 /// included) when it's selected, then shows them. The tree never holds them.
-/// A newer selection cancels an older read, and an entry is only shown
-/// under its own DN — switching quickly can't show the wrong attributes.
+/// A newer selection cancels an older read.
+///
+/// While the next entry loads, the previous one stays up — disabled, so
+/// nothing can act on it, and veiled if the read takes a moment — rather
+/// than being swapped for a spinner. Tearing the detail view down and
+/// building it again (its table above all) for every click cost more than
+/// the read itself.
 struct EntryDetailLoader: View {
     let dn: String
     /// Bumped by `BrowserView` to re-read the same entry after a change.
@@ -131,9 +136,9 @@ struct EntryDetailLoader: View {
 
     var body: some View {
         Group {
-            if let current = entry, DN.same(current.dn, dn) {
-                // Not `Binding($entry)`: that force-unwraps, and switching
-                // entries clears `entry` while this view can still read it.
+            if let current = entry, DN.same(current.dn, dn) || loadError == nil {
+                let isCurrent = DN.same(current.dn, dn)
+                // Not `Binding($entry)`: that force-unwraps.
                 EntryDetailView(
                     entry: Binding(get: { entry ?? current }, set: { entry = $0 }),
                     tree: tree,
@@ -144,6 +149,12 @@ struct EntryDetailLoader: View {
                     operations: operations,
                     onChange: onChange
                 )
+                .disabled(!isCurrent)
+                .overlay {
+                    if !isCurrent {
+                        PendingEntryVeil(name: DN.rdn(of: dn)).id(dn)
+                    }
+                }
             } else if let loadError {
                 ContentUnavailableView {
                     Label("Couldn't Load Entry", systemImage: "exclamationmark.triangle")
@@ -164,7 +175,6 @@ struct EntryDetailLoader: View {
 
     private func load() async {
         let dn = dn
-        if let current = entry, !DN.same(current.dn, dn) { entry = nil }
         loadError = nil
         do {
             let fetched = try await fetchEntry(connection.ldapTarget, dn: dn)
@@ -182,6 +192,26 @@ struct EntryDetailLoader: View {
         } catch {
             guard !Task.isCancelled else { return }
             loadError = "\(error)"
+        }
+    }
+}
+
+/// Covers the previous entry while the selected one loads — only once the
+/// read has taken long enough to notice, so a quick one never flickers.
+private struct PendingEntryVeil: View {
+    let name: String
+    @State private var isVisible = false
+
+    var body: some View {
+        ZStack {
+            if isVisible {
+                Rectangle().fill(.background.opacity(0.7))
+                ProgressView("Loading \(name)…")
+            }
+        }
+        .task {
+            try? await Task.sleep(for: .milliseconds(150))
+            isVisible = true
         }
     }
 }
@@ -522,6 +552,15 @@ struct EntryDetailView: View {
             }
         }
         .disabled(isPerformingAction)
+        .onChange(of: entry.dn) {
+            // Kept alive from one entry to the next (see EntryDetailLoader),
+            // so what belongs to a single entry is reset by hand.
+            selection = nil
+            searchText = ""
+            showOperational = false
+            operationalRows = []
+            passwordPolicyRows = []
+        }
         .task(id: operationalFetchKey) { await loadOperational() }
         .task(id: passwordPolicyFetchKey) { await loadPasswordPolicy() }
         .sheet(item: $attributeBeingViewed) { attribute in
