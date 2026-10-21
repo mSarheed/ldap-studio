@@ -414,18 +414,13 @@ struct EditEntryView: View {
                 bindDn: connection.bindDN, password: password,
                 baseDn: dn, scope: .base, filter: "(objectClass=*)"
             )
-            // The schema only feeds autocomplete here; one already read this
-            // session will do rather than holding the editor up for another.
-            let cached = cachedSchema(connection.ldapTarget)
-            async let schemaTask: LdapSchema? = if let cached { cached } else {
-                try? await fetchSchema(
-                    host: connection.host, port: UInt16(clamping: connection.port),
-                    useSsl: connection.useSSL, startTLS: connection.useStartTLS,
-                    pinnedCertSHA256: connection.trustedCertSHA256,
-                    options: connection.ldapOptions,
-                    bindDn: connection.bindDN, password: password
-                )
-            }
+            async let schemaTask: LdapSchema? = try? await fetchSchema(
+                host: connection.host, port: UInt16(clamping: connection.port),
+                useSsl: connection.useSSL, startTLS: connection.useStartTLS,
+                pinnedCertSHA256: connection.trustedCertSHA256,
+                options: connection.ldapOptions,
+                bindDn: connection.bindDN, password: password
+            )
             guard let entry = try await entryTask.first else {
                 loadError = "The entry was not found."
                 isLoading = false
