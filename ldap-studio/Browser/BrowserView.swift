@@ -88,44 +88,21 @@ struct BrowserView: View {
                         retry()
                     }
                 }
-            } else if tree.root != nil {
-                NavigationSplitView {
-                    DirectoryTreeView(
-                        tree: tree,
-                        selection: $selection,
-                        connection: connection,
-                        schema: schema,
-                        bookmarks: connection.bookmarks,
-                        onToggleBookmark: toggleBookmark,
-                        onUpdateSavedFilters: updateSavedFilters,
-                        operations: operations,
-                        onChange: { change in await apply(change) },
-                        onRefreshDetail: { detailReloadToken += 1 }
-                    )
-                    .navigationSplitViewColumnWidth(min: 200, ideal: 260)
-                } detail: {
-                    if let selection {
-                        EntryDetailLoader(
-                            dn: selection,
-                            reloadToken: detailReloadToken,
-                            tree: tree,
-                            connection: connection,
-                            schema: schema,
-                            operations: operations,
-                            isBookmarked: connection.bookmarks.contains { DN.same($0, selection) },
-                            onToggleBookmark: { toggleBookmark(selection) },
-                            onChange: { change in await apply(change) }
-                        )
-                    } else {
-                        ContentUnavailableView(
-                            "No Selection",
-                            systemImage: "sidebar.left",
-                            description: Text("Select an entry from the tree to view its attributes.")
-                        )
-                    }
-                }
             } else {
-                ProgressView("Connecting to \(connection.host)…")
+                // Up before the connection is: building the split view and
+                // window chrome takes as long as connecting to a nearby
+                // server, so it's done while waiting rather than after.
+                NavigationSplitView {
+                    if tree.root == nil {
+                        ProgressView("Connecting to \(connection.host)…")
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .navigationSplitViewColumnWidth(min: 200, ideal: 260)
+                    } else {
+                        treeView
+                    }
+                } detail: {
+                    detail
+                }
             }
         }
         .frame(minWidth: 700, minHeight: 420)
@@ -210,6 +187,47 @@ struct BrowserView: View {
 
                 \(SSHHostKeyFingerprint.openSSH(fromHex: pending.fingerprint))
                 """)
+        }
+    }
+
+    private var treeView: some View {
+        DirectoryTreeView(
+            tree: tree,
+            selection: $selection,
+            connection: connection,
+            schema: schema,
+            bookmarks: connection.bookmarks,
+            onToggleBookmark: toggleBookmark,
+            onUpdateSavedFilters: updateSavedFilters,
+            operations: operations,
+            onChange: { change in await apply(change) },
+            onRefreshDetail: { detailReloadToken += 1 }
+        )
+        .navigationSplitViewColumnWidth(min: 200, ideal: 260)
+    }
+
+    @ViewBuilder
+    private var detail: some View {
+        // Not while (re)connecting: a selection kept across a settings
+        // change may not exist on the server being connected to.
+        if let selection, tree.root != nil {
+            EntryDetailLoader(
+                dn: selection,
+                reloadToken: detailReloadToken,
+                tree: tree,
+                connection: connection,
+                schema: schema,
+                operations: operations,
+                isBookmarked: connection.bookmarks.contains { DN.same($0, selection) },
+                onToggleBookmark: { toggleBookmark(selection) },
+                onChange: { change in await apply(change) }
+            )
+        } else {
+            ContentUnavailableView(
+                "No Selection",
+                systemImage: "sidebar.left",
+                description: Text("Select an entry from the tree to view its attributes.")
+            )
         }
     }
 
