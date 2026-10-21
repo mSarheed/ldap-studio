@@ -57,10 +57,21 @@ final class ConnectionStore {
         return name
     }
 
-    func update(_ connection: SavedConnection) {
-        guard let index = connections.firstIndex(where: { $0.id == connection.id }) else { return }
+    /// False if the connection is no longer in the store (deleted while one
+    /// of its windows was still open), in which case nothing is saved.
+    @discardableResult
+    func update(_ connection: SavedConnection) -> Bool {
+        guard let index = connections.firstIndex(where: { $0.id == connection.id }) else { return false }
         connections[index] = connection
         persist()
+        return true
+    }
+
+    /// The store's current copy of `connection`. Windows are opened with a
+    /// snapshot of the connection, so this is how they see edits made after
+    /// they opened. Falls back to the snapshot once the connection is deleted.
+    func latest(_ connection: SavedConnection) -> SavedConnection {
+        connections.first { $0.id == connection.id } ?? connection
     }
 
     func setFavorite(_ isFavorite: Bool, for id: SavedConnection.ID) {

@@ -8,13 +8,14 @@ import SwiftUI
 struct BrowserView: View {
     @Environment(ConnectionStore.self) private var store
 
-    /// Seeded from the value the window opened with; the only field that
-    /// changes here is `trustedCertSHA256`, when the user accepts an
-    /// untrusted certificate (then persisted back through the store).
-    @State private var connection: SavedConnection
+    /// Always the store's current copy (see LiveConnection), never a private
+    /// one — so a setting edited in the Home window applies here, and a
+    /// bookmark written back from here can't undo it. Changes made here go
+    /// through `store.update` and arrive back in this property.
+    let connection: SavedConnection
 
     init(connection: SavedConnection) {
-        _connection = State(initialValue: connection)
+        self.connection = connection
         _tree = State(initialValue: DirectoryTree(connection: connection))
         _operations = State(initialValue: BranchOperations(connection: connection))
     }
@@ -25,6 +26,9 @@ struct BrowserView: View {
     /// confirmations show over this whole window.
     @State private var operations: BranchOperations
     @State private var loadError: String?
+    /// Bumped by every loadDirectory call, and when the settings change —
+    /// see there and onChange(of: connectSettings).
+    @State private var loadGeneration = 0
     /// Bumped to make the detail view re-read the selected entry.
     @State private var detailReloadToken = 0
     @State private var isShowingCertTrust = false
@@ -132,6 +136,38 @@ struct BrowserView: View {
         .task {
             await loadDirectory()
         }
+        .onChange(of: connectSettings) {
+            // Edited in the Home window, or a certificate / host key was just
+            // trusted here. Whatever is on screen came from the old settings
+            // (or failed with them), so take it down rather than leave it up
+            // and usable while connecting with the new ones. That includes a
+            // trust prompt still open for the old server — the new load
+            // raises a fresh one if it's still needed. A password-only edit
+            // doesn't land here (the password lives in the Keychain, not the
+            // connection) — Try Again picks that up.
+            //
+            // Bumping the generation here, not just in the Task's load, also
+            // drops an old load whose result is already queued to run before
+            // that Task starts — it would otherwise put the old server's
+            // tree, error or trust prompt straight back.
+            loadGeneration += 1
+            // A fresh tree: the old one's nodes came from the old server, and
+            // its base DN is fixed when it's made.
+            tree.cancelAll()
+            tree = DirectoryTree(connection: connection)
+            schema = nil
+            operations.schema = nil
+            loadError = nil
+            isShowingCertTrust = false
+            pendingSSHHostKey = nil
+            Task { await reload(selecting: selection) }
+        }
+        .onChange(of: connection) {
+            // Every edit, connect settings or not — branch operations check
+            // `isReadOnly`, for one.
+            tree.connection = connection
+            operations.connection = connection
+        }
         .sheet(isPresented: $isShowingCertTrust) {
             CertificateTrustSheet(
                 host: connection.host,
@@ -139,9 +175,13 @@ struct BrowserView: View {
                 useSSL: connection.useSSL,
                 useStartTLS: connection.useStartTLS
             ) { sha256 in
-                connection.trustedCertSHA256 = sha256
-                store.update(connection)
-                retry()
+                var updated = connection
+                updated.trustedCertSHA256 = sha256
+                // Reconnects through onChange(of: connectSettings) — retrying
+                // right here would still see the connection without the pin.
+                if !store.update(updated) {
+                    loadError = "This connection has been deleted, so the certificate couldn't be trusted."
+                }
             }
         }
         .alert(
@@ -153,10 +193,13 @@ struct BrowserView: View {
             presenting: pendingSSHHostKey
         ) { pending in
             Button("Trust and Connect") {
-                connection.sshHostKeySHA256 = pending.fingerprint
-                store.update(connection)
                 pendingSSHHostKey = nil
-                retry()
+                var updated = connection
+                updated.sshHostKeySHA256 = pending.fingerprint
+                // Reconnects through onChange(of: connectSettings).
+                if !store.update(updated) {
+                    loadError = "This connection has been deleted, so the SSH host key couldn't be trusted."
+                }
             }
             Button("Cancel", role: .cancel) {
                 pendingSSHHostKey = nil
@@ -231,31 +274,55 @@ struct BrowserView: View {
 
     private func retry() {
         loadError = nil
-        tree.connection = connection
-        operations.connection = connection
         Task {
             await loadDirectory()
         }
     }
 
+    /// Everything about the connection that shapes how it connects. Built by
+    /// blanking out what's only bookkeeping, so a field added later counts
+    /// as a connection setting by default.
+    private var connectSettings: SavedConnection {
+        var settings = connection
+        settings.name = ""
+        settings.bookmarks = []
+        settings.savedFilters = []
+        settings.isFavorite = false
+        settings.isReadOnly = false
+        return settings
+    }
+
     /// Pin or unpin `dn` in this connection's bookmark list, then persist.
     private func toggleBookmark(_ dn: String) {
-        if let index = connection.bookmarks.firstIndex(where: { DN.same($0, dn) }) {
-            connection.bookmarks.remove(at: index)
+        var updated = connection
+        if let index = updated.bookmarks.firstIndex(where: { DN.same($0, dn) }) {
+            updated.bookmarks.remove(at: index)
         } else {
-            connection.bookmarks.insert(dn, at: 0)
+            updated.bookmarks.insert(dn, at: 0)
         }
-        store.update(connection)
+        store.update(updated)
     }
 
     private func updateSavedFilters(_ filters: [SavedLDAPFilter]) {
-        connection.savedFilters = filters
-        store.update(connection)
+        var updated = connection
+        updated.savedFilters = filters
+        store.update(updated)
     }
 
     /// Opens the tree — the base entry and its direct children, nothing
     /// more — with the schema (for autocomplete) loading alongside.
     private func loadDirectory() async {
+        // The store's copy rather than `self.connection`, so a load always
+        // uses the current settings.
+        let connection = store.latest(connection)
+        // Loads can overlap — settings edited mid-connect, Try Again — and
+        // the core runs them one at a time, so an older one can finish
+        // last. Only the newest may change the screen.
+        loadGeneration += 1
+        let generation = loadGeneration
+        // This load's tree: a settings change swaps in a new one meanwhile.
+        let tree = self.tree
+        tree.connection = connection
         let target = connection.ldapTarget
         // Run together rather than one after the other — the schema fetch
         // is a nice-to-have for autocomplete, not something worth making
@@ -263,24 +330,51 @@ struct BrowserView: View {
         async let schemaTask: LdapSchema? = try? await fetchSchema(target)
         await tree.loadRoot()
 
+        guard generation == loadGeneration else { return }
         if let error = tree.rootError {
-            handleLoadError(error)
+            showLoadFailure(error, for: connection)
             return
         }
-        schema = await schemaTask
-        operations.schema = schema
+        let loadedSchema = await schemaTask
+        guard generation == loadGeneration else { return }
+        schema = loadedSchema
+        operations.schema = loadedSchema
+        loadError = nil
     }
 
-    private func handleLoadError(_ error: Error) {
+    /// What a failed load leaves on screen: the error, plus a prompt to
+    /// trust the certificate / SSH host key when it's a first sighting.
+    private func showLoadFailure(_ error: Error, for connection: SavedConnection) {
         guard let error = error as? ConnectionError else {
             loadError = "\(error)"
             return
         }
-        // An untrusted certificate isn't a dead end — offer to inspect
-        // and pin it. Anything the user already pinned that still fails
-        // is a real problem, so show it plainly.
-        if case .TLSUntrusted = error, connection.trustedCertSHA256 == nil {
+        if case let .TLSUntrusted(host, port, _) = error, connection.trustedCertSHA256 == nil {
+            // An untrusted certificate isn't a dead end — offer to inspect
+            // and pin it. The error underneath is what's left if the user
+            // cancels. Anything already pinned that still fails is a real
+            // problem, so that's shown plainly below.
+            loadError = "The certificate for \(host):\(port) isn't trusted, so no connection was made."
             isShowingCertTrust = true
+        } else if case let .TLSUntrusted(host, port, _) = error {
+            // With a pin set the core only reports TLSUntrusted when the
+            // fingerprint doesn't match. Like a changed SSH host key, that
+            // is never a one-click decision — but say where to go, since
+            // the fix lives in another window. Over an SSH tunnel nothing
+            // but the pin checks the certificate (it can't match the host
+            // name of the local forward), so say what clearing it gives up.
+            let afterClearing = connection.useSSHTunnel
+                ? "This window will then reconnect, but through the SSH tunnel the certificate can't be checked against the host name, so it will accept whatever certificate the server presents."
+                : "This window will then reconnect, and if the system doesn't trust the new certificate, it will show it to you to check first."
+            loadError = """
+                The certificate for \(host):\(port) no longer matches the one you trusted.
+
+                This usually means the certificate was renewed, or that the host name points at \
+                several servers (an Active Directory domain name, for example) and a different one \
+                answered. It can also mean someone is intercepting the connection. If you know the \
+                change is legitimate, clear the trusted certificate under Edit Connection › Network \
+                and save. \(afterClearing)
+                """
         } else if case let .SSHHostKeyUntrusted(host, port, fingerprint) = error {
             if connection.sshHostKeySHA256 == nil {
                 pendingSSHHostKey = PendingSSHHostKey(host: host, port: port, fingerprint: fingerprint)
@@ -295,7 +389,7 @@ struct BrowserView: View {
 
                     This can mean the server was rebuilt, or that someone is intercepting the connection. \
                     If you know the change is legitimate, clear the trusted host key under Edit Connection \
-                    › SSH Tunnel, then connect again.
+                    › SSH Tunnel and save. This window will then reconnect and ask you to check the new key.
                     """
             }
         } else {
@@ -325,6 +419,16 @@ struct BrowserView: View {
         case let .branchChanged(dn):
             await tree.branchChanged(dn)
             if let selected = selection, DN.isWithin(selected, dn) { detailReloadToken += 1 }
+        }
+    }
+
+    /// Reconnects, keeping `dn` selected if the new tree can reach it.
+    private func reload(selecting dn: String?) async {
+        await loadDirectory()
+        if let dn, let found = try? await tree.reveal(dn) {
+            selection = found
+        } else {
+            selection = nil
         }
     }
 }

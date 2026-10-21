@@ -555,6 +555,21 @@ struct NewConnectionSheet: View {
                     This can mean the server was rebuilt, or that someone is intercepting the connection. \
                     If you know the change is legitimate, clear the trusted host key above and test again.
                     """
+            } catch ConnectionError.TLSUntrusted where trustedCertSHA256 != nil {
+                // Pinned and no longer matching — see BrowserView.showLoadFailure.
+                testSucceeded = false
+                let afterClearing = useSSHTunnel
+                    ? "Through the SSH tunnel the certificate can't be checked against the host name, so after that this connection will accept whatever certificate the server presents."
+                    : "When you next open the connection, you'll be asked to check the new certificate if the system doesn't trust it."
+                testResultMessage = """
+                    The server's certificate no longer matches the one you trusted.
+
+                    This usually means the certificate was renewed, or that the host name points at \
+                    several servers (an Active Directory domain name, for example) and a different one \
+                    answered. It can also mean someone is intercepting the connection. If you know the \
+                    change is legitimate, clear the trusted certificate on the Network page and save. \
+                    \(afterClearing)
+                    """
             } catch {
                 testSucceeded = false
                 testResultMessage = "\(error)"
