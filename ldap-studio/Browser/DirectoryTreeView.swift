@@ -250,8 +250,10 @@ struct DirectoryTreeView: View {
             }
             .onChange(of: treeSelection) { oldValue, newValue in
                 rowContext.selection = newValue
+                // Marked as a click only when the list is what changes the
+                // selection — not when it's echoing one made elsewhere.
                 if let added = newValue.subtracting(oldValue).first {
-                    rowContext.pickedInList = added
+                    if added != selection { rowContext.pickedInList = added }
                     selection = added
                 } else if let selection, !newValue.contains(selection) {
                     rowContext.pickedInList = newValue.first
@@ -271,8 +273,11 @@ struct DirectoryTreeView: View {
                 // selection made elsewhere — Go to DN, a search result, a
                 // bookmark — needs selecting in the list and scrolling to.
                 // Animating that scroll on every click also cost more than
-                // the rest of the click put together.
-                guard newValue != rowContext.pickedInList else { return }
+                // the rest of the click put together. The mark is for this
+                // change only, so it can't stop a later one being scrolled to.
+                let isClick = newValue == rowContext.pickedInList
+                rowContext.pickedInList = nil
+                guard !isClick else { return }
                 if tree.node(newValue) != nil {
                     treeSelection = [newValue]
                 }
@@ -963,6 +968,7 @@ struct DirectoryTreeView: View {
     /// scrolled to. One that's already selected (a search hit) just needs
     /// its row selected now that the tree shows it.
     private func select(_ dn: String) {
+        rowContext.pickedInList = nil
         if selection == dn {
             treeSelection = [dn]
         } else {
