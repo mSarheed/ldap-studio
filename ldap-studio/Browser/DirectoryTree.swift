@@ -371,6 +371,14 @@ final class DirectoryTree {
 
     private func readChildren(of node: TreeNode, isRefresh: Bool, generation: Int) async {
         var received: [TreeRow] = []
+        // Pages handed off to be turned into rows. The next page is asked
+        // for meanwhile rather than after — waiting on each page's rows
+        // more than doubled the time a large branch took to read.
+        var preparing: [Task<[TreeRow], Never>] = []
+        func collect() async {
+            for page in preparing { received += await page.value }
+            preparing = []
+        }
         var truncated = false
         var lastShown = ContinuousClock.now
         // Every write to the node below happens only while this is still
@@ -386,10 +394,11 @@ final class DirectoryTree {
                     idleTimeout: max(30, connection.timeoutSeconds * 2)
                 )
                 let outcome = try await pagedSearch(target, request) { page, progress in
-                    received += await Self.prepare(page)
+                    preparing.append(Self.prepare(page))
                     // Show the first page right away, then merge in batches
                     // so a branch of 100,000 doesn't redraw 200 times.
                     if progress.pages == 1 || ContinuousClock.now - lastShown > .milliseconds(500) {
+                        await collect()
                         guard isCurrent() else { return false }
                         node.loadedCount = progress.entries
                         if !isRefresh {
@@ -402,6 +411,7 @@ final class DirectoryTree {
                     return true
                 }
                 truncated = outcome.wasTruncated
+                await collect()
             }
             guard isCurrent() else { return }
             let sorted = await Self.sorted(received)
@@ -425,8 +435,8 @@ final class DirectoryTree {
         node.isRefreshing = false
     }
 
-    nonisolated private static func prepare(_ page: [LdapEntry]) async -> [TreeRow] {
-        await Task.detached(priority: .userInitiated) { page.map(TreeRow.init) }.value
+    nonisolated private static func prepare(_ page: [LdapEntry]) -> Task<[TreeRow], Never> {
+        Task.detached(priority: .userInitiated) { page.map(TreeRow.init) }
     }
 
     nonisolated private static func sorted(_ rows: [TreeRow]) async -> [TreeRow] {
