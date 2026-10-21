@@ -57,6 +57,8 @@ struct SchemaView: View {
     @State private var jumpAttributeName: String?
     @State private var jumpObjectClassName: String?
     @State private var coordinator = SchemaJumpCoordinator.shared
+    /// A fresh read is under way, possibly behind a copy from earlier.
+    @State private var isReading = false
 
     private var endpoint: String {
         "\(connection.host):\(UInt16(clamping: connection.port))"
@@ -104,25 +106,34 @@ struct SchemaView: View {
 
     private func load() async {
         loadError = nil
-        do {
-            schema = try await fetchSchema(
-                host: connection.host,
-                port: UInt16(clamping: connection.port),
-                useSsl: connection.useSSL,
-                startTLS: connection.useStartTLS,
-                pinnedCertSHA256: connection.trustedCertSHA256,
-                options: connection.ldapOptions,
-                bindDn: connection.bindDN,
-                password: KeychainService.readPassword(for: connection.id) ?? ""
-            )
+        let target = connection.ldapTarget
+        // Already read this session (usually by the browser): show it now,
+        // then swap in a fresh read if the server's has changed since.
+        if schema == nil, let cached = cachedSchema(target) {
+            // After the window's first frame: building the lists into the
+            // window's initial layout costs more than into one already up.
+            try? await Task.sleep(for: .zero)
+            schema = cached
+        }
+        isReading = true
+        defer {
+            isReading = false
+            // Only once the fresh read is in: a jump to something just added
+            // to the schema wouldn't be found in the copy shown before it.
             applyPendingJump()
+        }
+        do {
+            let fresh = try await fetchSchema(target)
+            if fresh != schema { schema = fresh }
         } catch {
-            loadError = "\(error)"
+            // A copy already showing is still the best there is.
+            if schema == nil { loadError = "\(error)" }
         }
     }
 
     private func applyPendingJump() {
-        guard let request = coordinator.pending, request.endpoint == endpoint else { return }
+        guard schema != nil, !isReading,
+              let request = coordinator.pending, request.endpoint == endpoint else { return }
         switch request.target {
         case .attribute(let name):
             selectedTab = .attributes

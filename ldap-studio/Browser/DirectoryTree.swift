@@ -43,6 +43,13 @@ final class TreeNode: Identifiable {
     /// says this entry may have children — what decides the expand arrow
     /// before the children have been read.
     private(set) var mayHaveChildren: Bool
+    /// Whether entries may be moved under this one by dropping them on its
+    /// row: anything not a leaf by its object classes (an empty OU is still
+    /// a container), plus whatever turns out to have children anyway.
+    /// LDAP itself would let a user or group have children too; leaving
+    /// those rows out is a deliberate trade for scrolling (see
+    /// TreeNodeRow.droppableRowLabel), and Move to… still reaches them.
+    private(set) var acceptsDrops: Bool
 
     var isExpanded = false
     fileprivate(set) var childrenState: Children = .notLoaded
@@ -79,6 +86,7 @@ final class TreeNode: Identifiable {
         sortKey = row.sortKey
         objectClasses = row.objectClasses
         mayHaveChildren = row.mayHaveChildren
+        acceptsDrops = row.acceptsDrops
         icon = row.icon
     }
 
@@ -90,6 +98,7 @@ final class TreeNode: Identifiable {
         // Assign only what changed: every assignment notifies observers.
         if objectClasses != row.objectClasses { objectClasses = row.objectClasses }
         if mayHaveChildren != row.mayHaveChildren { mayHaveChildren = row.mayHaveChildren }
+        if acceptsDrops != row.acceptsDrops { acceptsDrops = row.acceptsDrops }
         if icon != row.icon { icon = row.icon }
     }
 
@@ -100,6 +109,7 @@ final class TreeNode: Identifiable {
     /// Marks that a child was just created under this entry.
     fileprivate func noteHasChildren() {
         if !mayHaveChildren { mayHaveChildren = true }
+        if !acceptsDrops { acceptsDrops = true }
     }
 
     /// Whether to draw an expand arrow: until the children have been read
@@ -151,6 +161,7 @@ nonisolated struct TreeRow: Sendable {
     let sortKey: String
     let objectClasses: [String]
     let mayHaveChildren: Bool
+    let acceptsDrops: Bool
     let icon: String
 
     init(_ entry: LdapEntry) {
@@ -160,6 +171,7 @@ nonisolated struct TreeRow: Sendable {
         sortKey = name.lowercased()
         objectClasses = entry.values("objectClass")
         mayHaveChildren = TreeRow.mayHaveChildren(entry)
+        acceptsDrops = mayHaveChildren || !TreeRow.isLeaf(objectClasses: objectClasses)
         icon = TreeRow.icon(for: entry, mayHaveChildren: mayHaveChildren)
     }
 
@@ -213,10 +225,14 @@ nonisolated struct TreeRow: Sendable {
         if let count = entry.values("msDS-Approx-Immed-Subordinates").first.flatMap(Int.init) {
             return count > 0
         }
-        let classes = Set(entry.values("objectClass").map { $0.lowercased() })
-        if !classes.isDisjoint(with: containerClasses) { return true }
-        if !classes.isDisjoint(with: leafClasses) { return false }
-        return true
+        return !isLeaf(objectClasses: entry.values("objectClass"))
+    }
+
+    /// What mayHaveChildren falls back on: a leaf class, and no container
+    /// class to say otherwise.
+    static func isLeaf(objectClasses: [String]) -> Bool {
+        let classes = Set(objectClasses.map { $0.lowercased() })
+        return classes.isDisjoint(with: containerClasses) && !classes.isDisjoint(with: leafClasses)
     }
 
     static func icon(for entry: LdapEntry, mayHaveChildren: Bool) -> String {
@@ -371,6 +387,14 @@ final class DirectoryTree {
 
     private func readChildren(of node: TreeNode, isRefresh: Bool, generation: Int) async {
         var received: [TreeRow] = []
+        // Pages handed off to be turned into rows. The next page is asked
+        // for meanwhile rather than after — waiting on each page's rows
+        // more than doubled the time a large branch took to read.
+        var preparing: [Task<[TreeRow], Never>] = []
+        func collect() async {
+            for page in preparing { received += await page.value }
+            preparing = []
+        }
         var truncated = false
         var lastShown = ContinuousClock.now
         // Every write to the node below happens only while this is still
@@ -386,10 +410,11 @@ final class DirectoryTree {
                     idleTimeout: max(30, connection.timeoutSeconds * 2)
                 )
                 let outcome = try await pagedSearch(target, request) { page, progress in
-                    received += await Self.prepare(page)
+                    preparing.append(Self.prepare(page))
                     // Show the first page right away, then merge in batches
                     // so a branch of 100,000 doesn't redraw 200 times.
                     if progress.pages == 1 || ContinuousClock.now - lastShown > .milliseconds(500) {
+                        await collect()
                         guard isCurrent() else { return false }
                         node.loadedCount = progress.entries
                         if !isRefresh {
@@ -402,6 +427,7 @@ final class DirectoryTree {
                     return true
                 }
                 truncated = outcome.wasTruncated
+                await collect()
             }
             guard isCurrent() else { return }
             let sorted = await Self.sorted(received)
@@ -425,8 +451,8 @@ final class DirectoryTree {
         node.isRefreshing = false
     }
 
-    nonisolated private static func prepare(_ page: [LdapEntry]) async -> [TreeRow] {
-        await Task.detached(priority: .userInitiated) { page.map(TreeRow.init) }.value
+    nonisolated private static func prepare(_ page: [LdapEntry]) -> Task<[TreeRow], Never> {
+        Task.detached(priority: .userInitiated) { page.map(TreeRow.init) }
     }
 
     nonisolated private static func sorted(_ rows: [TreeRow]) async -> [TreeRow] {
@@ -548,6 +574,8 @@ final class DirectoryTree {
     }
 
     func refreshAll() async {
+        viewed = [:]
+        viewedOrder = []
         guard let root else {
             await loadRoot()
             return
@@ -655,6 +683,40 @@ final class DirectoryTree {
         return child
     }
 
+    // MARK: Entries already read
+
+    /// Full entries the detail view has read, by normalized DN, so going
+    /// back to one shows it straight away while it's read again. Kept to
+    /// the most recently viewed, and dropped whenever a write here touches
+    /// them (see Keeping up with writes).
+    @ObservationIgnored private var viewed: [String: DirectoryEntry] = [:]
+    @ObservationIgnored private var viewedOrder: [String] = []
+    private static let viewedLimit = 200
+
+    func viewedEntry(_ dn: String) -> DirectoryEntry? {
+        viewed[DN.normalize(dn)]
+    }
+
+    func noteViewed(_ entry: DirectoryEntry) {
+        let key = DN.normalize(entry.dn)
+        if viewed.updateValue(entry, forKey: key) != nil {
+            viewedOrder.removeAll { $0 == key }
+        }
+        viewedOrder.append(key)
+        if viewedOrder.count > Self.viewedLimit {
+            viewed[viewedOrder.removeFirst()] = nil
+        }
+    }
+
+    /// Forgets the viewed copies of `dn` and everything under it.
+    private func forgetViewed(within dn: String) {
+        let key = DN.normalize(dn)
+        let stale = viewedOrder.filter { DN.keyIsWithin($0, key) }
+        guard !stale.isEmpty else { return }
+        for k in stale { viewed[k] = nil }
+        viewedOrder.removeAll { DN.keyIsWithin($0, key) }
+    }
+
     /// Stops every read in flight — the window showing this tree closed.
     func cancelAll() {
         for task in loads.values { task.cancel() }
@@ -676,6 +738,7 @@ final class DirectoryTree {
 
     /// `dn` (and everything under it) no longer exists.
     func entryRemoved(_ dn: String) {
+        forgetViewed(within: dn)
         guard let node = node(dn) else { return }
         forget(node)
         if let parentDN = DN.parent(of: node.dn), let parent = self.node(parentDN) {
@@ -686,6 +749,7 @@ final class DirectoryTree {
 
     /// `dn`'s attributes changed — its icon or arrow might have too.
     func entryModified(_ dn: String) async {
+        forgetViewed(within: dn)
         guard let node = node(dn),
               let entry = try? await fetchEntry(target, dn: dn, attributes: TreeRow.treeAttributes)
         else { return }
@@ -701,6 +765,7 @@ final class DirectoryTree {
     /// Something changed under `dn` in ways not worth tracking one by one
     /// (an LDIF import, a partly finished bulk operation).
     func branchChanged(_ dn: String) async {
+        forgetViewed(within: dn)
         var ancestor: String? = dn
         while let current = ancestor, node(current) == nil {
             ancestor = DN.parent(of: current)

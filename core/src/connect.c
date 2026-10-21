@@ -44,17 +44,24 @@ static double monotonic_seconds(void) {
 /* Backs run_with_deadline below. */
 typedef struct {
   LDAP *ld;
-  double deadline;
-  volatile bool call_done;
+  struct timespec deadline; /* CLOCK_REALTIME, for pthread_cond_timedwait */
+  pthread_mutex_t lock;
+  pthread_cond_t cond;
+  bool call_done; /* protected by lock */
 } ConnectDeadline;
 
+/* Waits for the call to finish or the deadline to pass, whichever comes
+ * first. It's woken the moment the call returns, so a connect that
+ * succeeds isn't held up joining this thread. */
 static void *connect_deadline_watch(void *arg) {
   ConnectDeadline *w = arg;
-  while (!w->call_done && monotonic_seconds() < w->deadline) {
-    struct timespec nap = {0, 20L * 1000 * 1000}; /* 20ms */
-    nanosleep(&nap, NULL);
-  }
-  if (!w->call_done) {
+  pthread_mutex_lock(&w->lock);
+  int wait_rc = 0;
+  while (!w->call_done && wait_rc == 0)
+    wait_rc = pthread_cond_timedwait(&w->cond, &w->lock, &w->deadline);
+  bool call_done = w->call_done;
+  pthread_mutex_unlock(&w->lock);
+  if (!call_done) {
     /* The deadline passed and fn() (running on the caller's thread) still
      * hasn't returned. The fd only exists once fn() actually starts
      * connecting, so it's fetched here rather than up front. Shutting it
@@ -94,18 +101,23 @@ static void *connect_deadline_watch(void *arg) {
  * reports as a timeout. */
 static int run_with_deadline(LDAP *ld, unsigned timeout_seconds,
                              int (*fn)(LDAP *)) {
-  ConnectDeadline w = {
-      .ld = ld,
-      .deadline = monotonic_seconds() + (double)timeout_seconds,
-      .call_done = false,
-  };
+  ConnectDeadline w = {.ld = ld, .call_done = false};
+  clock_gettime(CLOCK_REALTIME, &w.deadline);
+  w.deadline.tv_sec += (time_t)timeout_seconds;
+  pthread_mutex_init(&w.lock, NULL);
+  pthread_cond_init(&w.cond, NULL);
   pthread_t thread;
   bool watching =
       pthread_create(&thread, NULL, connect_deadline_watch, &w) == 0;
 
   int rc = fn(ld);
+  pthread_mutex_lock(&w.lock);
   w.call_done = true;
+  pthread_cond_signal(&w.cond);
+  pthread_mutex_unlock(&w.lock);
   if (watching) pthread_join(thread, NULL);
+  pthread_cond_destroy(&w.cond);
+  pthread_mutex_destroy(&w.lock);
   return rc;
 }
 
@@ -995,7 +1007,7 @@ void ls_connection_mark_broken(LSConnection *conn) { conn->broken = true; }
 /* ── certificate probe (for the trust dialog) ─────────────────────── */
 
 /* An X509_NAME as a single RFC 2253-ish line. Caller frees. */
-static char *x509_name_string(X509_NAME *name) {
+static char *x509_name_string(const X509_NAME *name) {
   if (!name) return ls_xstrdup("");
   BIO *bio = BIO_new(BIO_s_mem());
   if (!bio) return ls_xstrdup("");
@@ -1098,8 +1110,8 @@ static int probe_certificate(const ConnPolicy *p, const char *host,
                    "could not parse the server certificate");
   }
 
-  X509_NAME *subject = X509_get_subject_name(cert);
-  X509_NAME *issuer = X509_get_issuer_name(cert);
+  const X509_NAME *subject = X509_get_subject_name(cert);
+  const X509_NAME *issuer = X509_get_issuer_name(cert);
   out->subject = x509_name_string(subject);
   out->issuer = x509_name_string(issuer);
   out->sha256 = x509_sha256_hex(cert);
@@ -1107,9 +1119,11 @@ static int probe_certificate(const ConnPolicy *p, const char *host,
   out->not_after = asn1_time_string(X509_get0_notAfter(cert));
   out->self_signed = X509_NAME_cmp(subject, issuer) == 0;
 
-  out->expired = false;
-  if (X509_cmp_current_time(X509_get0_notAfter(cert)) < 0) out->expired = true;
-  if (X509_cmp_current_time(X509_get0_notBefore(cert)) > 0) out->expired = true;
+  /* -1 / 1: before / after now; a time that can't be read (-2) isn't
+   * reported as expired. */
+  time_t now = time(NULL);
+  out->expired = ASN1_TIME_cmp_time_t(X509_get0_notAfter(cert), now) == -1 ||
+                 ASN1_TIME_cmp_time_t(X509_get0_notBefore(cert), now) == 1;
 
   out->host_mismatch = false;
   if (host && *host &&

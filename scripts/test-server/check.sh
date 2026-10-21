@@ -32,7 +32,7 @@ xcrun -sdk macosx swiftc -O -swift-version 5 -default-isolation MainActor \
     ldap-studio/Browser/EntryActions.swift ldap-studio/Browser/LDIFParser.swift \
     scripts/test-server/checks/*.swift \
     core/build/libldapstudio.a \
-    -L"$B/openldap/lib" -L"$B/openssl@3/lib" -L"$B/libxcrypt/lib" -L"$B/libssh2/lib" \
+    -L"$B/openldap/lib" -L"$B/openssl@4/lib" -L"$B/libxcrypt/lib" -L"$B/libssh2/lib" \
     -lldap -llber -lcrypto -lcrypt -lssh2 -framework ImageIO -framework CoreGraphics \
     -o "$OUT/checks"
 
@@ -80,7 +80,7 @@ CONF
     SSHD_PID=$!
     for _ in $(seq 50); do nc -z 127.0.0.1 2222 2>/dev/null && break; sleep 0.1; done
     clang -std=c11 -Icore/include -I"$B/openldap/include" scripts/test-server/checks/ssh_check.c core/build/libldapstudio.a \
-        -L"$B/openldap/lib" -L"$B/openssl@3/lib" -L"$B/libxcrypt/lib" -L"$B/libssh2/lib" \
+        -L"$B/openldap/lib" -L"$B/openssl@4/lib" -L"$B/libxcrypt/lib" -L"$B/libssh2/lib" \
         -lldap -llber -lcrypto -lcrypt -lssh2 -framework ImageIO -framework CoreGraphics \
         -o "$OUT/ssh_check"
     "$OUT/ssh_check" "$OUT/clientkey"

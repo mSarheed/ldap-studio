@@ -4,7 +4,7 @@
 # From Xcode:  the "Build C Core" script phase runs `make`, passing ARCHS,
 #              MACOSX_DEPLOYMENT_TARGET and SDKROOT through the environment.
 #
-# Depends on the Homebrew formulae in ../Brewfile (openldap, openssl@3,
+# Depends on the Homebrew formulae in ../Brewfile (openldap, openssl@4,
 # libxcrypt) — all keg-only, so their include paths are added explicitly.
 
 SRC := $(wildcard src/*.c)
@@ -24,7 +24,7 @@ CLANG_TIDY   ?= $(firstword $(shell command -v clang-tidy 2>/dev/null) \
                             $(wildcard /opt/homebrew/opt/llvm*/bin/clang-tidy) clang-tidy)
 
 OPENLDAP  := $(shell $(BREW) --prefix openldap 2>/dev/null)
-OPENSSL   := $(shell $(BREW) --prefix openssl@3 2>/dev/null)
+OPENSSL   := $(shell $(BREW) --prefix openssl@4 2>/dev/null)
 LIBXCRYPT := $(shell $(BREW) --prefix libxcrypt 2>/dev/null)
 LIBSSH2   := $(shell $(BREW) --prefix libssh2 2>/dev/null)
 
@@ -33,7 +33,7 @@ $(error openldap not found — run `brew bundle` from the repo root)
 endif
 
 ifeq ($(OPENSSL),)
-$(error openssl@3 not found — run `brew bundle` from the repo root)
+$(error openssl@4 not found — run `brew bundle` from the repo root)
 endif
 
 ifeq ($(LIBXCRYPT),)
@@ -42,6 +42,18 @@ endif
 
 ifeq ($(LIBSSH2),)
 $(error libssh2 not found — run `brew bundle` from the repo root)
+endif
+
+# The core calls OpenSSL itself and libldap and libssh2 bring their own, so
+# all three have to be the same one — a second OpenSSL in the app is one the
+# bundling phase may not ship. Homebrew moves its libraries to a new OpenSSL
+# major now and then; when it does, update openssl@N here, in ../Brewfile
+# and in the Xcode project's library search paths.
+LDAP_SSL := $(shell otool -L $(OPENLDAP)/lib/libldap.dylib 2>/dev/null | awk '/libssl/ {print $$1}')
+ifneq ($(LDAP_SSL),)
+ifeq ($(findstring $(OPENSSL)/,$(LDAP_SSL)),)
+$(error Homebrew's openldap links $(LDAP_SSL), not the OpenSSL in $(OPENSSL) — see the note above this check)
+endif
 endif
 
 ARCHS ?= $(shell uname -m)
@@ -70,6 +82,30 @@ all: $(LIB)
 $(LIB): $(OBJ)
 	@mkdir -p $(dir $@)
 	libtool -static -o $@ $(OBJ)
+
+# Everything an object is compiled with, recorded so that a change to it —
+# a dependency moving to a new keg (openssl@3 → @4), another SDK or
+# architecture — rebuilds the objects rather than linking ones built
+# against the old headers. Compared while the Makefile is read, before make
+# looks at any object, so their timestamps don't come into it — and only
+# for a real build: not `make -n`/`-q`/`-t`, `format-check` or the like,
+# which would otherwise delete the library an Xcode build just made.
+BUILD_CONFIG := $(CC) $(ARCHFLAGS) $(MINFLAG) $(SYSROOT) $(CFLAGS) $(CPPFLAGS)
+CONFIG_STAMP := build/config.stamp
+# MAKEFLAGS starts with the single-letter flags (n dry run, q question,
+# t touch — none of them builds), or with a variable assignment when there
+# are none.
+MAKEFLAGS_FIRST := $(firstword -$(MAKEFLAGS))
+DRY_RUN := $(if $(findstring =,$(MAKEFLAGS_FIRST)),,$(strip \
+             $(findstring n,$(MAKEFLAGS_FIRST))$(findstring q,$(MAKEFLAGS_FIRST))$(findstring t,$(MAKEFLAGS_FIRST))))
+BUILDING := $(if $(MAKECMDGOALS),$(filter all $(LIB) $(OBJ),$(MAKECMDGOALS)),all)
+ifeq ($(DRY_RUN),)
+ifneq ($(BUILDING),)
+ifneq ($(BUILD_CONFIG),$(shell cat $(CONFIG_STAMP) 2>/dev/null))
+$(shell mkdir -p build && rm -f $(OBJ) $(LIB) && echo '$(BUILD_CONFIG)' > $(CONFIG_STAMP))
+endif
+endif
+endif
 
 # -MMD -MP emits a build/src/foo.d listing every header foo.c pulls in, so
 # editing e.g. ldapstudio.h forces the affected .o files to rebuild.

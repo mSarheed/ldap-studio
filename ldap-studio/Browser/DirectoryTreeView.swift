@@ -250,20 +250,35 @@ struct DirectoryTreeView: View {
             }
             .onChange(of: treeSelection) { oldValue, newValue in
                 rowContext.selection = newValue
+                // Marked as a click only when the list is what changes the
+                // selection — not when it's echoing one made elsewhere.
                 if let added = newValue.subtracting(oldValue).first {
+                    if added != selection { rowContext.pickedInList = added }
                     selection = added
                 } else if let selection, !newValue.contains(selection) {
+                    rowContext.pickedInList = newValue.first
                     self.selection = newValue.first
                 } else if newValue.isEmpty {
+                    rowContext.pickedInList = nil
                     selection = nil
                 }
             }
             .onChange(of: selection) { _, newValue in
                 guard let newValue else {
+                    rowContext.pickedInList = nil
                     treeSelection.removeAll()
                     return
                 }
-                if !treeSelection.contains(newValue), tree.node(newValue) != nil {
+                // A row clicked (or arrowed to) is already on screen; only a
+                // selection made elsewhere — Go to DN, a search result, a
+                // bookmark — needs selecting in the list and scrolling to.
+                // Animating that scroll on every click also cost more than
+                // the rest of the click put together. The mark is for this
+                // change only, so it can't stop a later one being scrolled to.
+                let isClick = newValue == rowContext.pickedInList
+                rowContext.pickedInList = nil
+                guard !isClick else { return }
+                if tree.node(newValue) != nil {
                     treeSelection = [newValue]
                 }
                 withAnimation {
@@ -939,13 +954,25 @@ struct DirectoryTreeView: View {
             isRevealing = true
             defer { isRevealing = false }
             do {
-                let resolved = try await tree.reveal(dn)
-                selection = resolved
-                treeSelection = [resolved]
+                select(try await tree.reveal(dn))
             } catch is CancellationError {
             } catch {
                 actionError = error.localizedDescription
             }
+        }
+    }
+
+    /// Selects a revealed entry. A new selection is selected in the list
+    /// and scrolled to by onChange(of: selection); setting the list's
+    /// selection here too would make it look like a click, which isn't
+    /// scrolled to. One that's already selected (a search hit) just needs
+    /// its row selected now that the tree shows it.
+    private func select(_ dn: String) {
+        rowContext.pickedInList = nil
+        if selection == dn {
+            treeSelection = [dn]
+        } else {
+            selection = dn
         }
     }
 
@@ -966,9 +993,7 @@ struct DirectoryTreeView: View {
             isRevealing = true
             defer { isRevealing = false }
             do {
-                let resolved = try await tree.reveal(trimmed)
-                selection = resolved
-                treeSelection = [resolved]
+                select(try await tree.reveal(trimmed))
                 isShowingGoTo = false
                 goToText = ""
             } catch {
@@ -989,6 +1014,9 @@ final class TreeRowContext {
     /// The tree's current selection — read only when a drag starts, so
     /// not observed.
     @ObservationIgnored var selection: Set<String> = []
+    /// The entry last selected by clicking in the list, which therefore
+    /// needs no scrolling to.
+    @ObservationIgnored var pickedInList: String?
     @ObservationIgnored var onDrop: ([String], String) -> Void = { _, _ in }
 
     /// A drag carries the whole selection if it started on a selected row.
@@ -1006,8 +1034,6 @@ private struct TreeNodeRow: View {
     let tree: DirectoryTree
     let context: TreeRowContext
 
-    @State private var isDropTarget = false
-
     var body: some View {
         if node.showsDisclosure {
             DisclosureGroup(isExpanded: Binding(
@@ -1019,12 +1045,12 @@ private struct TreeNodeRow: View {
                 }
                 statusRow
             } label: {
-                rowLabel
+                droppableRowLabel
                     .tag(node.id)
             }
             .id(node.id)
         } else {
-            rowLabel
+            droppableRowLabel
                 .tag(node.id)
                 .id(node.id)
         }
@@ -1088,6 +1114,20 @@ private struct TreeNodeRow: View {
         }
     }
 
+    /// Only rows that can have children take drops. A drop target is most
+    /// of what a row costs SwiftUI to set up as it scrolls into view, and
+    /// leaf rows (users, groups) are the bulk of any large branch — so they
+    /// aren't drop targets, though the server would accept children under
+    /// them; the rare move there goes through Move to… instead.
+    @ViewBuilder
+    private var droppableRowLabel: some View {
+        if node.acceptsDrops || node.showsDisclosure {
+            rowLabel.modifier(TreeDropTarget(node: node, context: context))
+        } else {
+            rowLabel
+        }
+    }
+
     private var rowLabel: some View {
         HStack(spacing: 4) {
             Label(node.name + countSuffix, systemImage: node.icon)
@@ -1103,20 +1143,33 @@ private struct TreeNodeRow: View {
             }
         }
         .contentShape(Rectangle())
-        .background(isDropTarget ? Color.accentColor.opacity(0.18) : .clear, in: RoundedRectangle(cornerRadius: 4))
         .draggable(dragPayload)
-        .dropDestination(for: Data.self) { items, _ in
-            guard !context.isReadOnly,
-                  let data = items.first,
-                  let ids = try? JSONDecoder().decode([DirectoryEntry.ID].self, from: data) else { return false }
-            context.onDrop(ids, node.dn)
-            return true
-        } isTargeted: { isTargeted in
-            isDropTarget = isTargeted
-        }
     }
 
     private var dragPayload: Data {
         (try? JSONEncoder().encode(context.draggedIDs(for: node.id))) ?? Data()
+    }
+}
+
+/// Lets entries dragged from the tree be dropped onto `node`, to move them
+/// under it.
+private struct TreeDropTarget: ViewModifier {
+    let node: TreeNode
+    let context: TreeRowContext
+
+    @State private var isTargeted = false
+
+    func body(content: Content) -> some View {
+        content
+            .background(isTargeted ? Color.accentColor.opacity(0.18) : .clear, in: RoundedRectangle(cornerRadius: 4))
+            .dropDestination(for: Data.self) { items, _ in
+                guard !context.isReadOnly,
+                      let data = items.first,
+                      let ids = try? JSONDecoder().decode([DirectoryEntry.ID].self, from: data) else { return false }
+                context.onDrop(ids, node.dn)
+                return true
+            } isTargeted: { isTargeted in
+                self.isTargeted = isTargeted
+            }
     }
 }
