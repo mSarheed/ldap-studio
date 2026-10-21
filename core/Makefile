@@ -88,14 +88,16 @@ $(LIB): $(OBJ)
 # architecture — rebuilds the objects rather than linking ones built
 # against the old headers. Compared while the Makefile is read, before make
 # looks at any object, so their timestamps don't come into it — and only
-# for a real build: not `make -n`, `format-check` or the like, which would
-# otherwise delete the library an Xcode build just made.
+# for a real build: not `make -n`/`-q`/`-t`, `format-check` or the like,
+# which would otherwise delete the library an Xcode build just made.
 BUILD_CONFIG := $(CC) $(ARCHFLAGS) $(MINFLAG) $(SYSROOT) $(CFLAGS) $(CPPFLAGS)
 CONFIG_STAMP := build/config.stamp
-# MAKEFLAGS starts with the single-letter flags (n for a dry run), or with
-# a variable assignment when there are none.
+# MAKEFLAGS starts with the single-letter flags (n dry run, q question,
+# t touch — none of them builds), or with a variable assignment when there
+# are none.
 MAKEFLAGS_FIRST := $(firstword -$(MAKEFLAGS))
-DRY_RUN := $(if $(findstring =,$(MAKEFLAGS_FIRST)),,$(findstring n,$(MAKEFLAGS_FIRST)))
+DRY_RUN := $(if $(findstring =,$(MAKEFLAGS_FIRST)),,$(strip \
+             $(findstring n,$(MAKEFLAGS_FIRST))$(findstring q,$(MAKEFLAGS_FIRST))$(findstring t,$(MAKEFLAGS_FIRST))))
 BUILDING := $(if $(MAKECMDGOALS),$(filter all $(LIB) $(OBJ),$(MAKECMDGOALS)),all)
 ifeq ($(DRY_RUN),)
 ifneq ($(BUILDING),)
