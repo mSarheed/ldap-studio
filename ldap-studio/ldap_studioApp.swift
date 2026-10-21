@@ -49,35 +49,37 @@ struct ldap_studioApp: App {
 
         WindowGroup(for: SavedConnection.self) { $connection in
             if let connection {
-                BrowserView(connection: connection)
+                LiveConnection(snapshot: connection) { BrowserView(connection: $0) }
                     .environment(store)
             }
         }
 
         WindowGroup(id: "schema", for: SavedConnection.self) { $connection in
             if let connection {
-                SchemaView(connection: connection)
+                LiveConnection(snapshot: connection) { SchemaView(connection: $0) }
                     .environment(store)
             }
         }
 
         WindowGroup(id: "ldif", for: SavedConnection.self) { $connection in
             if let connection {
-                LDIFEditorView(connection: connection)
+                LiveConnection(snapshot: connection) { LDIFEditorView(connection: $0) }
                     .environment(store)
             }
         }
 
         WindowGroup(id: "editEntry", for: EditEntryRequest.self) { $request in
             if let request {
-                EditEntryView(connection: request.connection, dn: request.dn)
-                    .environment(store)
+                LiveConnection(snapshot: request.connection) {
+                    EditEntryView(connection: $0, dn: request.dn)
+                }
+                .environment(store)
             }
         }
 
         WindowGroup(id: "serverInfo", for: SavedConnection.self) { $connection in
             if let connection {
-                ServerInfoView(connection: connection)
+                LiveConnection(snapshot: connection) { ServerInfoView(connection: $0) }
                     .environment(store)
             }
         }
@@ -87,5 +89,29 @@ struct ldap_studioApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)
+    }
+}
+
+/// `WindowGroup(for:)` hands a window the connection as it was when the
+/// window opened (or was restored). This swaps that snapshot for the
+/// store's current copy, so edits made in the Home window afterwards — a
+/// cleared certificate, Read-only, a new host — reach windows that are
+/// already open instead of only ones opened after a relaunch.
+private struct LiveConnection<Content: View>: View {
+    @Environment(ConnectionStore.self) private var store
+    let snapshot: SavedConnection
+    let content: (SavedConnection) -> Content
+
+    /// The last copy seen in the store. Once the connection is deleted, its
+    /// open windows keep the settings they were last using — falling back to
+    /// `snapshot` would roll them back to whatever they were opened with.
+    @State private var lastStored: SavedConnection?
+
+    var body: some View {
+        let stored = store.connections.first { $0.id == snapshot.id }
+        content(stored ?? lastStored ?? snapshot)
+            .onChange(of: stored, initial: true) { _, stored in
+                if let stored { lastStored = stored }
+            }
     }
 }
