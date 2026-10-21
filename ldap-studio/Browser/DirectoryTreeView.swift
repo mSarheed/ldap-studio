@@ -1028,8 +1028,6 @@ private struct TreeNodeRow: View {
     let tree: DirectoryTree
     let context: TreeRowContext
 
-    @State private var isDropTarget = false
-
     var body: some View {
         if node.showsDisclosure {
             DisclosureGroup(isExpanded: Binding(
@@ -1041,7 +1039,12 @@ private struct TreeNodeRow: View {
                 }
                 statusRow
             } label: {
+                // Only rows that can have children take drops. A drop
+                // target is most of what a row costs SwiftUI to set up as
+                // it scrolls into view, and leaf rows (users, groups) are
+                // the bulk of any large branch.
                 rowLabel
+                    .modifier(TreeDropTarget(node: node, context: context))
                     .tag(node.id)
             }
             .id(node.id)
@@ -1125,20 +1128,33 @@ private struct TreeNodeRow: View {
             }
         }
         .contentShape(Rectangle())
-        .background(isDropTarget ? Color.accentColor.opacity(0.18) : .clear, in: RoundedRectangle(cornerRadius: 4))
         .draggable(dragPayload)
-        .dropDestination(for: Data.self) { items, _ in
-            guard !context.isReadOnly,
-                  let data = items.first,
-                  let ids = try? JSONDecoder().decode([DirectoryEntry.ID].self, from: data) else { return false }
-            context.onDrop(ids, node.dn)
-            return true
-        } isTargeted: { isTargeted in
-            isDropTarget = isTargeted
-        }
     }
 
     private var dragPayload: Data {
         (try? JSONEncoder().encode(context.draggedIDs(for: node.id))) ?? Data()
+    }
+}
+
+/// Lets entries dragged from the tree be dropped onto `node`, to move them
+/// under it.
+private struct TreeDropTarget: ViewModifier {
+    let node: TreeNode
+    let context: TreeRowContext
+
+    @State private var isTargeted = false
+
+    func body(content: Content) -> some View {
+        content
+            .background(isTargeted ? Color.accentColor.opacity(0.18) : .clear, in: RoundedRectangle(cornerRadius: 4))
+            .dropDestination(for: Data.self) { items, _ in
+                guard !context.isReadOnly,
+                      let data = items.first,
+                      let ids = try? JSONDecoder().decode([DirectoryEntry.ID].self, from: data) else { return false }
+                context.onDrop(ids, node.dn)
+                return true
+            } isTargeted: { isTargeted in
+                self.isTargeted = isTargeted
+            }
     }
 }
