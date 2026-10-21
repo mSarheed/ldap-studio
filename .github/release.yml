@@ -1,0 +1,5 @@
+# Shapes the notes `gh release create --generate-notes` writes from merged PRs.
+changelog:
+  exclude:
+    labels: [skip-changelog]
+    authors: [dependabot, "dependabot[bot]"]

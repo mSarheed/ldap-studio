@@ -1,0 +1,68 @@
+name: CI
+on:
+  pull_request:
+    paths-ignore: ["**/*.md", "docs/**", "images/**", "assets/**"]
+  push:
+    branches: [main]
+    paths-ignore: ["**/*.md", "docs/**", "images/**", "assets/**"]
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+permissions:
+  contents: read
+env:
+  HOMEBREW_NO_INSTALL_CLEANUP: "1"
+jobs:
+  build:
+    name: Build (${{ matrix.configuration }})
+    runs-on: xcode-27
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [Debug, Release]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install dependencies
+        run: brew bundle --file=Brewfile
+      - name: Check C formatting
+        if: matrix.configuration == 'Release'
+        run: make -C core format-check
+      # Ad-hoc signed rather than unsigned: the phase that bundles the Homebrew
+      # libraries, and fails on any left pointing at Homebrew, only runs when
+      # signing is on.
+      - name: Build
+        run: |
+          xcodebuild build -project ldap-studio.xcodeproj -scheme ldap-studio \
+            -configuration ${{ matrix.configuration }} -destination 'generic/platform=macOS' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM=
+      # A missing or mismatched bundled library only shows at launch.
+      - name: Launch
+        env:
+          APP: ${{ runner.temp }}/DerivedData/Build/Products/${{ matrix.configuration }}/ldap-studio.app
+        run: |
+          "$APP/Contents/MacOS/ldap-studio" > "$RUNNER_TEMP/launch.log" 2>&1 &
+          PID=$!
+          sleep 15
+          if ! kill -0 "$PID" 2>/dev/null; then
+            cat "$RUNNER_TEMP/launch.log"
+            echo "::error::ldap-studio exited during launch"
+            exit 1
+          fi
+          kill "$PID"
+  integration:
+    name: Checks against a test server
+    runs-on: xcode-27
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install dependencies
+        run: brew bundle --file=Brewfile
+      - name: Start the test server
+        run: scripts/test-server/run.sh start
+      - name: Run the checks
+        run: scripts/test-server/check.sh
+      - name: Stop the test server
+        if: always()
+        run: scripts/test-server/run.sh stop

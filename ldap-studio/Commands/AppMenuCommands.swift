@@ -12,6 +12,8 @@ struct AppMenuCommands: Commands {
     @FocusedValue(\.ldifEditorCommands) private var ldifEditorCommands
     @FocusedValue(\.entryDetailCommands) private var entryDetailCommands
     @Environment(\.openWindow) private var openWindow
+    @AppStorage(UpdateChecker.includesBetasKey)
+    private var includesBetas = UpdateChecker.includesBetasByDefault
 
     /// True when a directory browser window is frontmost — `directoryCommands`
     /// is only published while one is. Used to point ⌘N at whichever "new"
@@ -27,6 +29,7 @@ struct AppMenuCommands: Commands {
             Button("Check for Updates…") {
                 Task { await UpdateChecker.shared.check(userInitiated: true) }
             }
+            Toggle("Check for Beta Versions", isOn: $includesBetas)
         }
 
         CommandGroup(replacing: .newItem) {
