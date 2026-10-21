@@ -7,6 +7,10 @@
 //  Automatic check runs at most once a day on launch; the app-menu item
 //  checks on demand.
 //
+//  Two channels: stable releases (vX.Y.Z) for everyone, and betas
+//  (vX.Y.Z-beta.N, published as GitHub pre-releases) for whoever turns on
+//  "Check for Beta Versions" — on by default in a beta build.
+//
 
 import AppKit
 import Foundation
@@ -16,24 +20,39 @@ final class UpdateChecker {
     static let shared = UpdateChecker()
     private init() {}
 
-    private let repo = "dethdkn/ldap-studio"
+    private let repo = "mSarheed/ldap-studio"
     /// How stale the last automatic check may be before we look again.
     private let automaticInterval: TimeInterval = 60 * 60 * 24
 
     private enum Key {
         static let lastCheck = "updateCheck.lastCheck"
         static let skippedVersion = "updateCheck.skippedVersion"
+        static let includesBetas = "updateCheck.includesBetas"
+    }
+
+    /// The `@AppStorage` key behind the "Check for Beta Versions" menu item.
+    static let includesBetasKey = Key.includesBetas
+
+    /// Until the user picks, a beta build follows betas — whoever installed
+    /// one asked for them — and a stable build doesn't.
+    static var includesBetasByDefault: Bool {
+        AppVersion(appVersion)?.isBeta ?? false
+    }
+
+    static var includesBetas: Bool {
+        UserDefaults.standard.object(forKey: Key.includesBetas) as? Bool ?? includesBetasByDefault
     }
 
     private struct Release: Decodable {
         let tagName: String
         let htmlURL: String
         let body: String?
+        let draft: Bool?
 
         enum CodingKeys: String, CodingKey {
             case tagName = "tag_name"
             case htmlURL = "html_url"
-            case body
+            case body, draft
         }
     }
 
@@ -52,16 +71,17 @@ final class UpdateChecker {
     /// `userInitiated` also reports "you're up to date" and any error.
     func check(userInitiated: Bool) async {
         do {
-            let release = try await fetchLatest()
+            let release = try await fetchNewest(includingBetas: Self.includesBetas)
             UserDefaults.standard.set(Date(), forKey: Key.lastCheck)
 
             let current = Self.appVersion
-            let latest = Self.normalise(release.tagName)
-
-            guard Self.version(latest, isNewerThan: current) else {
+            // An unparseable local version (a hand-made build) is behind everything.
+            guard let release, let newest = AppVersion(release.tagName),
+                  newest > AppVersion(current) ?? AppVersion.zero else {
                 if userInitiated { await alertUpToDate(current) }
                 return
             }
+            let latest = newest.description
             if !userInitiated,
                UserDefaults.standard.string(forKey: Key.skippedVersion) == latest {
                 return
@@ -88,8 +108,30 @@ final class UpdateChecker {
 
     // MARK: - Network
 
-    private func fetchLatest() async throws -> Release {
-        guard let url = URL(string: "https://api.github.com/repos/\(repo)/releases/latest") else {
+    /// The newest release on the channel, or nil when it has none yet.
+    /// `releases/latest` is GitHub's newest non-pre-release; with betas, the
+    /// highest version in the whole list wins.
+    private func fetchNewest(includingBetas: Bool) async throws -> Release? {
+        if includingBetas {
+            // Every page: the list is newest-published first, which needn't
+            // be highest-versioned first.
+            var releases: [Release] = []
+            for page in 1...10 {
+                let batch: [Release] = try await get("releases?per_page=100&page=\(page)") ?? []
+                releases += batch
+                if batch.count < 100 { break }
+            }
+            return releases
+                .filter { $0.draft != true }
+                .compactMap { release in AppVersion(release.tagName).map { (release, $0) } }
+                .max { $0.1 < $1.1 }?.0
+        }
+        return try await get("releases/latest")
+    }
+
+    /// GETs `repos/<repo>/<path>`; nil on 404 (no releases yet).
+    private func get<T: Decodable>(_ path: String) async throws -> T? {
+        guard let url = URL(string: "https://api.github.com/repos/\(repo)/\(path)") else {
             throw URLError(.badURL)
         }
         var request = URLRequest(url: url)
@@ -99,10 +141,10 @@ final class UpdateChecker {
         request.cachePolicy = .reloadIgnoringLocalCacheData
 
         let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            throw URLError(.badServerResponse)
-        }
-        return try JSONDecoder().decode(Release.self, from: data)
+        guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+        if http.statusCode == 404 { return nil }
+        guard http.statusCode == 200 else { throw URLError(.badServerResponse) }
+        return try JSONDecoder().decode(T.self, from: data)
     }
 
     // MARK: - Versions
@@ -119,23 +161,50 @@ final class UpdateChecker {
         return Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
     }
 
-    /// "v1.2.0" / "1.2.0-beta.1" -> "1.2.0"
-    static func normalise(_ tag: String) -> String {
-        var s = tag.trimmingCharacters(in: .whitespaces)
-        if s.first == "v" || s.first == "V" { s.removeFirst() }
-        if let dash = s.firstIndex(of: "-") { s = String(s[..<dash]) }
-        return s
-    }
+    /// A release version as tagged: "1.4.0", or "1.4.0-beta.2" for a beta.
+    /// A stable release is newer than every beta of the same version, so a
+    /// beta user is offered 1.4.0 once it replaces 1.4.0-beta.2.
+    struct AppVersion: Comparable, CustomStringConvertible {
+        static let zero = AppVersion(release: [0, 0, 0], beta: nil)
 
-    static func version(_ a: String, isNewerThan b: String) -> Bool {
-        let lhs = a.split(separator: ".").map { Int($0) ?? 0 }
-        let rhs = b.split(separator: ".").map { Int($0) ?? 0 }
-        for i in 0..<max(lhs.count, rhs.count) {
-            let l = i < lhs.count ? lhs[i] : 0
-            let r = i < rhs.count ? rhs[i] : 0
-            if l != r { return l > r }
+        let release: [Int]
+        /// nil for a stable release.
+        let beta: Int?
+
+        var isBeta: Bool { beta != nil }
+
+        /// "v1.4.0", "1.4.0", "1.4" or "1.4.0-beta.2"; nil for anything else.
+        init?(_ string: String) {
+            var s = Substring(string.trimmingCharacters(in: .whitespaces))
+            if s.first == "v" || s.first == "V" { s = s.dropFirst() }
+            let parts = s.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false)
+            let numbers = parts[0].split(separator: ".", omittingEmptySubsequences: false).map { Int($0) }
+            guard (1...3).contains(numbers.count), numbers.allSatisfy({ ($0 ?? -1) >= 0 }) else { return nil }
+            var beta: Int?
+            if parts.count == 2 {
+                guard parts[1].hasPrefix("beta."), let n = Int(parts[1].dropFirst(5)), n > 0 else { return nil }
+                beta = n
+            }
+            self.init(release: numbers.compactMap { $0 } + Array(repeating: 0, count: 3 - numbers.count), beta: beta)
         }
-        return false
+
+        private init(release: [Int], beta: Int?) {
+            self.release = release
+            self.beta = beta
+        }
+
+        var description: String {
+            release.map(String.init).joined(separator: ".") + (beta.map { "-beta.\($0)" } ?? "")
+        }
+
+        static func < (lhs: AppVersion, rhs: AppVersion) -> Bool {
+            if lhs.release != rhs.release { return lhs.release.lexicographicallyPrecedes(rhs.release) }
+            switch (lhs.beta, rhs.beta) {
+            case let (l?, r?): return l < r
+            case (_?, nil): return true
+            default: return false
+            }
+        }
     }
 
     // MARK: - Alerts
