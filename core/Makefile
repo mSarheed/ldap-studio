@@ -87,11 +87,22 @@ $(LIB): $(OBJ)
 # a dependency moving to a new keg (openssl@3 → @4), another SDK or
 # architecture — rebuilds the objects rather than linking ones built
 # against the old headers. Compared while the Makefile is read, before make
-# looks at any object, so their timestamps don't come into it.
+# looks at any object, so their timestamps don't come into it — and only
+# for a real build: not `make -n`, `format-check` or the like, which would
+# otherwise delete the library an Xcode build just made.
 BUILD_CONFIG := $(CC) $(ARCHFLAGS) $(MINFLAG) $(SYSROOT) $(CFLAGS) $(CPPFLAGS)
 CONFIG_STAMP := build/config.stamp
+# MAKEFLAGS starts with the single-letter flags (n for a dry run), or with
+# a variable assignment when there are none.
+MAKEFLAGS_FIRST := $(firstword -$(MAKEFLAGS))
+DRY_RUN := $(if $(findstring =,$(MAKEFLAGS_FIRST)),,$(findstring n,$(MAKEFLAGS_FIRST)))
+BUILDING := $(if $(MAKECMDGOALS),$(filter all $(LIB) $(OBJ),$(MAKECMDGOALS)),all)
+ifeq ($(DRY_RUN),)
+ifneq ($(BUILDING),)
 ifneq ($(BUILD_CONFIG),$(shell cat $(CONFIG_STAMP) 2>/dev/null))
 $(shell mkdir -p build && rm -f $(OBJ) $(LIB) && echo '$(BUILD_CONFIG)' > $(CONFIG_STAMP))
+endif
+endif
 endif
 
 # -MMD -MP emits a build/src/foo.d listing every header foo.c pulls in, so
