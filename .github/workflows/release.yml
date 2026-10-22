@@ -189,14 +189,30 @@ jobs:
           if [ -n "$NOTES_START" ]; then ARGS+=(--notes-start-tag "$NOTES_START"); fi
           if [ "$PRERELEASE" = true ]; then ARGS+=(--prerelease --latest=false); else ARGS+=(--latest); fi
           gh release create "$TAG" dist/* "${ARGS[@]}"
-      # Installed apps read appcast.xml from main (SUFeedURL), so this is what
-      # offers them the update. The contents API refuses the write if main's
-      # appcast changed since it was read.
+
+  # Installed apps read appcast.xml from main (SUFeedURL), so this is what
+  # offers them the update. A job of its own, so that if it fails it can be
+  # re-run without publishing the release again.
+  appcast:
+    needs: [prepare, build, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+      BUILD: ${{ github.run_number }}
+      ENCLOSURE: ${{ needs.build.outputs.enclosure }}
+      MINIMUM_SYSTEM: ${{ needs.build.outputs.minimum_system }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The contents API refuses the write if main's appcast changed since it
+      # was read.
       - name: Add the release to the appcast
-        env:
-          BUILD: ${{ github.run_number }}
-          ENCLOSURE: ${{ needs.build.outputs.enclosure }}
-          MINIMUM_SYSTEM: ${{ needs.build.outputs.minimum_system }}
         run: |
           gh release view "$TAG" --json body --jq .body > "$RUNNER_TEMP/notes.md"
           gh api markdown -f mode=gfm -f context="$GH_REPO" -F text=@"$RUNNER_TEMP/notes.md" > "$RUNNER_TEMP/notes.html"
