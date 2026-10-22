@@ -21,6 +21,8 @@ struct QuickSearchPanel: View {
     /// Shows the selected entry in the detail view — needed as well as
     /// setting `selection`, which may already be this entry.
     let onShowEntry: () -> Void
+    /// The detail view shows the search table rather than an entry.
+    let isShowingSearchResults: Bool
     /// Bumped by ↓ in the search field: move into the results.
     let focusRequest: Int
     let tree: DirectoryTree
@@ -261,6 +263,10 @@ struct QuickSearchPanel: View {
                 guard let first = groups.first?.matches.first else { return }
                 isListFocused = true
                 if listSelection == nil { listSelection = first.dn }
+            }
+            .onChange(of: isShowingSearchResults) { _, isShowing in
+                // So picking the same result again is a change, and shows it.
+                if isShowing { listSelection = nil }
             }
             .onChange(of: listSelection) { _, dn in
                 guard let dn else { return }

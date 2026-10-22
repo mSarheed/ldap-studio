@@ -66,6 +66,9 @@ struct DirectoryTreeView: View {
     @FocusState private var goToFieldFocused: Bool
 
     @State private var treeSelection: Set<DirectoryEntry.ID> = []
+    /// Set while the list's selection is changed from here rather than by a
+    /// click, so the change isn't taken as the user picking a row.
+    @State private var isSettingTreeSelection = false
     /// What every row needs besides its node. One stable object, so a
     /// selection change doesn't make SwiftUI re-evaluate thousands of rows.
     @State private var rowContext = TreeRowContext()
@@ -111,6 +114,7 @@ struct DirectoryTreeView: View {
                     baseDN: $searchBaseDN,
                     selection: $selection,
                     onShowEntry: onShowEntry,
+                    isShowingSearchResults: isShowingSearchResults,
                     focusRequest: searchResultsFocusRequest,
                     tree: tree,
                     connection: connection,
@@ -125,6 +129,8 @@ struct DirectoryTreeView: View {
                     },
                     onEditSavedSearches: onEditSavedSearches
                 )
+                // Esc from the results as well as from the field.
+                .onExitCommand { endSearch() }
             } else {
                 treeList
             }
@@ -253,11 +259,18 @@ struct DirectoryTreeView: View {
             }
             .onChange(of: treeSelection) { oldValue, newValue in
                 rowContext.selection = newValue
+                if isSettingTreeSelection {
+                    isSettingTreeSelection = false
+                    return
+                }
                 // Marked as a click only when the list is what changes the
                 // selection — not when it's echoing one made elsewhere.
                 if let added = newValue.subtracting(oldValue).first {
                     if added != selection { rowContext.pickedInList = added }
                     selection = added
+                    // Shown in place of search results even when it was
+                    // already the selected entry.
+                    onShowEntry()
                 } else if let selection, !newValue.contains(selection) {
                     rowContext.pickedInList = newValue.first
                     self.selection = newValue.first
@@ -282,14 +295,16 @@ struct DirectoryTreeView: View {
                 rowContext.pickedInList = nil
                 guard !isClick else { return }
                 if tree.node(newValue) != nil {
-                    treeSelection = [newValue]
+                    setTreeSelection([newValue])
                 }
                 withAnimation {
                     proxy.scrollTo(newValue, anchor: .center)
                 }
             }
             .onAppear {
-                if let selection, tree.node(selection) != nil { treeSelection = [selection] }
+                if !isShowingSearchResults, let selection, tree.node(selection) != nil {
+                    setTreeSelection([selection])
+                }
                 updateRowContext()
                 rowContext.onDrop = { ids, destination in
                     guard !connection.isReadOnly else { return }
@@ -298,6 +313,15 @@ struct DirectoryTreeView: View {
             }
             .onChange(of: bookmarks) { updateRowContext() }
             .onChange(of: isReadOnly) { updateRowContext() }
+            .onChange(of: isShowingSearchResults) { _, isShowing in
+                // Nothing is highlighted while the table is up, so clicking
+                // the entry it replaced is a change, and shows it again.
+                if isShowing {
+                    setTreeSelection([])
+                } else if let selection, tree.node(selection) != nil {
+                    setTreeSelection([selection])
+                }
+            }
         }
     }
 
@@ -907,6 +931,13 @@ struct DirectoryTreeView: View {
                 actionError = error.localizedDescription
             }
         }
+    }
+
+    /// Changes the list's selection without it counting as a click.
+    private func setTreeSelection(_ ids: Set<DirectoryEntry.ID>) {
+        guard ids != treeSelection else { return }
+        isSettingTreeSelection = true
+        treeSelection = ids
     }
 
     /// Selects a revealed entry. A new selection is selected in the list
