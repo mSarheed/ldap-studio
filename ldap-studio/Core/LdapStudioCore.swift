@@ -394,9 +394,10 @@ private func cScheme(_ s: PasswordScheme) -> LSPasswordScheme {
 }
 
 /// Ships the app's own CA bundle to the C layer, once. The bundled
-/// OpenSSL can't read Homebrew's default cert store from inside the App
-/// Sandbox, so without this every ldaps:// handshake fails with a
-/// "Connect error". Swift runs this exactly once, thread-safely.
+/// OpenSSL's compiled-in default store is a path from the tree it was
+/// built in (core/deps/build.sh), which doesn't exist on users' Macs, so
+/// without this every ldaps:// handshake fails with a "Connect error".
+/// Swift runs this exactly once, thread-safely.
 private let installBundledCACert: Void = {
     if let path = Bundle.main.path(forResource: "openssl-cacert", ofType: "pem") {
         ls_set_tls_cacert(path)

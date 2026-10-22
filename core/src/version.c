@@ -3,8 +3,9 @@
  * libraries this build was compiled against, for the "About" window.
  *
  * Taken from each library's own header at compile time. Because the Xcode
- * build compiles against and bundles the dylibs from the same Homebrew
- * prefix, these match what actually ships in the .app.
+ * build compiles against and bundles the dylibs from the same tree,
+ * core/build/deps (built by core/deps/build.sh), these match what
+ * actually ships in the .app.
  */
 #include <crypt.h>         /* XCRYPT_VERSION_STR */
 #include <ldap_features.h> /* LDAP_VENDOR_VERSION_{MAJOR,MINOR,PATCH} */

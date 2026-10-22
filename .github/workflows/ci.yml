@@ -13,52 +13,168 @@ permissions:
 env:
   HOMEBREW_NO_INSTALL_CLEANUP: "1"
 jobs:
-  build:
-    name: Build (${{ matrix.configuration }})
+  # The libraries the app bundles (OpenSSL, libxcrypt, OpenLDAP, libssh2),
+  # built from source for both architectures and the app's minimum macOS by
+  # core/deps/build.sh. Minutes of work, so built once here, kept across
+  # runs, and handed to the other jobs — including the macOS 26 and Intel
+  # runners, which run them as they are.
+  libraries:
+    name: Build the bundled libraries
     runs-on: xcode-27
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Work out the minimum macOS
+        id: target
+        run: echo "version=$(scripts/deployment-target.sh)" >> "$GITHUB_OUTPUT"
+      # Keyed on what goes into the build (the stamp in core/deps/build.sh).
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: core/build/deps
+          key: libraries-${{ hashFiles('core/deps/build.sh', 'core/deps/patches/*/*') }}-macos${{ steps.target.outputs.version }}
+      - name: Build
+        run: make -C core deps ARCHS="arm64 x86_64"
+      # A tarball: artifacts keep neither symlinks nor permissions.
+      - name: Pack
+        run: tar -C core/build -czf "$RUNNER_TEMP/libraries.tgz" deps
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: libraries
+          path: ${{ runner.temp }}/libraries.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  # The same libraries built on an Intel Mac, where it's the arm64 slices
+  # that are cross-compiled: the path a contributor with one takes, and
+  # the proof that cross-compiling in either direction gives the same
+  # result. Cached like the Apple Silicon build, so slow only when the
+  # libraries change; nothing waits on it.
+  libraries-intel:
+    name: Build the bundled libraries on Intel
+    needs: libraries
+    runs-on: macos-26-intel
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: libraries
+          path: ${{ runner.temp }}
+      - name: Unpack the Apple Silicon build
+        run: mkdir -p "$RUNNER_TEMP/reference" && tar -C "$RUNNER_TEMP/reference" -xzf "$RUNNER_TEMP/libraries.tgz"
+      - name: Work out the minimum macOS
+        id: target
+        run: echo "version=$(scripts/deployment-target.sh)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: core/build/deps
+          key: libraries-intel-${{ hashFiles('core/deps/build.sh', 'core/deps/patches/*/*') }}-macos${{ steps.target.outputs.version }}
+      - name: Build
+        run: make -C core deps ARCHS="arm64 x86_64"
+      - name: Compare with the Apple Silicon build
+        run: |
+          core/deps/compare.sh core/build/deps "$RUNNER_TEMP/reference/deps"
+          core/build/deps/libexec/slapd -VV
+
+  # Also once with Xcode 26, which a contributor on macOS 26 has.
+  build:
+    name: Build (${{ matrix.configuration }}, Xcode ${{ matrix.xcode }})
+    needs: libraries
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        configuration: [Debug, Release]
+        include:
+          - { configuration: Debug, runner: xcode-27, xcode: 27 }
+          - { configuration: Release, runner: xcode-27, xcode: 27 }
+          - { configuration: Debug, runner: macos-26, xcode: 26 }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: libraries
+          path: ${{ runner.temp }}
+      - name: Unpack the bundled libraries
+        run: mkdir -p core/build && tar -C core/build -xzf "$RUNNER_TEMP/libraries.tgz"
+      # The CA bundle the app ships comes from Homebrew's ca-certificates.
       - name: Install dependencies
         run: brew bundle --file=Brewfile
       - name: Check C formatting
         if: matrix.configuration == 'Release'
         run: make -C core format-check
-      # Ad-hoc signed rather than unsigned: the phase that bundles the Homebrew
-      # libraries, and fails on any left pointing at Homebrew, only runs when
-      # signing is on.
+      # Universal, as releases are. Ad-hoc signed rather than unsigned: the
+      # phase that bundles the libraries — and fails on one missing, built
+      # for one architecture only or for a newer macOS than the app's
+      # minimum — only runs when signing is on.
       - name: Build
         run: |
           xcodebuild build -project ldap-studio.xcodeproj -scheme ldap-studio \
             -configuration ${{ matrix.configuration }} -destination 'generic/platform=macOS' \
-            -derivedDataPath "$RUNNER_TEMP/DerivedData" ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" ARCHS="arm64 x86_64" ONLY_ACTIVE_ARCH=NO \
             CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM=
-      # A missing or mismatched bundled library only shows at launch.
       - name: Launch
-        env:
-          APP: ${{ runner.temp }}/DerivedData/Build/Products/${{ matrix.configuration }}/ldap-studio.app
-        run: |
-          "$APP/Contents/MacOS/ldap-studio" > "$RUNNER_TEMP/launch.log" 2>&1 &
-          PID=$!
-          sleep 15
-          if ! kill -0 "$PID" 2>/dev/null; then
-            cat "$RUNNER_TEMP/launch.log"
-            echo "::error::ldap-studio exited during launch"
-            exit 1
-          fi
-          kill "$PID"
-  integration:
-    name: Checks against a test server
-    runs-on: xcode-27
-    timeout-minutes: 30
+        run: scripts/launch-check.sh "$RUNNER_TEMP/DerivedData/Build/Products/${{ matrix.configuration }}/ldap-studio.app"
+      - name: Pack
+        if: matrix.configuration == 'Release'
+        run: ditto -c -k --keepParent --sequesterRsrc "$RUNNER_TEMP/DerivedData/Build/Products/Release/ldap-studio.app" "$RUNNER_TEMP/ldap-studio.zip"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: matrix.configuration == 'Release'
+        with:
+          name: app
+          path: ${{ runner.temp }}/ldap-studio.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  # The app built above, launched on the oldest macOS it supports, on both
+  # kinds of Mac.
+  launch:
+    name: Launch on ${{ matrix.name }}
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-26, name: "macOS 26, Apple Silicon" }
+          - { runner: macos-26-intel, name: "macOS 26, Intel" }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install dependencies
-        run: brew bundle --file=Brewfile
+        with:
+          sparse-checkout: scripts
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: app
+          path: ${{ runner.temp }}
+      - name: Launch
+        run: |
+          ditto -x -k "$RUNNER_TEMP/ldap-studio.zip" "$RUNNER_TEMP/app"
+          scripts/launch-check.sh "$RUNNER_TEMP/app/ldap-studio.app"
+
+  # The core and the app's non-UI code, against a real server, on every
+  # macOS and architecture the app supports. The server is the slapd built
+  # with the libraries.
+  integration:
+    name: Checks against a test server (${{ matrix.name }})
+    needs: libraries
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: xcode-27, name: "macOS 27, Apple Silicon" }
+          - { runner: macos-26, name: "macOS 26, Apple Silicon" }
+          - { runner: macos-26-intel, name: "macOS 26, Intel" }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: libraries
+          path: ${{ runner.temp }}
+      - name: Unpack the bundled libraries
+        run: mkdir -p core/build && tar -C core/build -xzf "$RUNNER_TEMP/libraries.tgz"
       - name: Start the test server
         run: scripts/test-server/run.sh start
       - name: Run the checks

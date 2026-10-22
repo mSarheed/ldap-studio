@@ -74,7 +74,7 @@
 				042AE3923026B0ED00251975 /* Sources */,
 				042AE3933026B0ED00251975 /* Frameworks */,
 				042AE3943026B0ED00251975 /* Resources */,
-				25D1BDBF4157D1BB77318400 /* Bundle Homebrew libraries */,
+				25D1BDBF4157D1BB77318400 /* Bundle libraries */,
 			);
 			buildRules = (
 			);
@@ -156,10 +156,10 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -e\nexport PATH=\"$PATH:/usr/bin:/opt/homebrew/bin\"\n# Builds core/build/libldapstudio.a. The Makefile picks up ARCHS,\n# MACOSX_DEPLOYMENT_TARGET and SDKROOT from Xcode's environment.\nmake -C \"${SRCROOT}/core\"\n";
+			shellScript = "set -e\nexport PATH=\"$PATH:/usr/bin:/opt/homebrew/bin:/usr/local/bin\"\n# Builds the bundled libraries (core/build/deps, from source, for every\n# architecture) and then core/build/libldapstudio.a. The Makefile picks\n# up ARCHS, MACOSX_DEPLOYMENT_TARGET and SDKROOT from Xcode's environment.\nmake -C \"${SRCROOT}/core\"\n";
 			showEnvVarsInLog = 0;
 		};
-		25D1BDBF4157D1BB77318400 /* Bundle Homebrew libraries */ = {
+		25D1BDBF4157D1BB77318400 /* Bundle libraries */ = {
 			isa = PBXShellScriptBuildPhase;
 			alwaysOutOfDate = 1;
 			buildActionMask = 2147483647;
@@ -169,14 +169,14 @@
 			);
 			inputPaths = (
 			);
-			name = "Bundle Homebrew libraries";
+			name = "Bundle libraries";
 			outputFileListPaths = (
 			);
 			outputPaths = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -e\nexport PATH=\"$PATH:/opt/homebrew/bin:/usr/bin\"\n\n# CA bundle for the bundled OpenSSL: the App Sandbox blocks its default\n# Homebrew cert path, so ship one in Resources for ls_set_tls_cacert().\nRES=\"${CODESIGNING_FOLDER_PATH}/Contents/Resources\"\nmkdir -p \"$RES\"\nCACERT=\"/opt/homebrew/etc/ca-certificates/cert.pem\"\n[ -f \"$CACERT\" ] || CACERT=\"$(brew --prefix openssl@4)/etc/openssl@4/cert.pem\"\nif [ -f \"$CACERT\" ]; then cp -f \"$CACERT\" \"$RES/openssl-cacert.pem\"; else echo \"warning: no CA bundle to embed - LDAPS will fail in the sandbox\" >&2; fi\n\nEXE=\"${CODESIGNING_FOLDER_PATH}/Contents/MacOS/${EXECUTABLE_NAME}\"\n# The app's own code: the executable and, in Debug builds, the dylibs beside\n# it that actually hold the code (ENABLE_DEBUG_DYLIB, previews).\nMACOS=\"${CODESIGNING_FOLDER_PATH}/Contents/MacOS\"\n\n# Every Homebrew library the app needs, found by following what links what\n# from the app's own code down rather than from a list kept by hand: when\n# Homebrew moved openldap and libssh2 to a new OpenSSL, a hand-kept list\n# left it out and the app crashed at launch. A dependency already pointed\n# at @rpath (by an earlier build) is looked up in the library search paths.\nresolve() {\n  case \"$1\" in\n    /opt/homebrew/*|/usr/local/*) echo \"$1\" ;;\n    @rpath/*)\n      for dir in $LIBRARY_SEARCH_PATHS; do\n        case \"$dir\" in /opt/homebrew/*|/usr/local/*) ;; *) continue ;; esac\n        if [ -f \"$dir/${1#@rpath/}\" ]; then echo \"$dir/${1#@rpath/}\"; return; fi\n      done ;;\n  esac\n}\ndeps() {\n  otool -L \"$1\" | tail -n +2 | awk '{print $1}' | while read -r dep; do resolve \"$dep\" || true; done\n}\nDYLIBS=\"\"\nNAMES=\" \"\nqueue=\"\"\nfor bin in \"$EXE\" \"$MACOS\"/*.dylib; do\n  if [ -f \"$bin\" ]; then queue=\"$queue $(deps \"$bin\")\"; fi\ndone\nwhile [ -n \"$queue\" ]; do\n  next=\"\"\n  for dep in $queue; do\n    base=\"$(basename \"$dep\")\"\n    case \"$NAMES\" in *\" $base \"*) continue ;; esac\n    NAMES=\"$NAMES$base \"\n    DYLIBS=\"$DYLIBS $dep\"\n    next=\"$next $(deps \"$dep\")\"\n  done\n  queue=\"$next\"\ndone\n[ -n \"$DYLIBS\" ] || { echo \"error: found no Homebrew libraries linked into the app's code in $MACOS\" >&2; exit 1; }\n\n# SwiftUI Previews JIT-launch the app with DYLD_LIBRARY_PATH forced to\n# BUILT_PRODUCTS_DIR and /opt/homebrew sandboxed off, so the runtime\n# dylibs have to sit there too or every preview in the app target fails\n# to load (Library not loaded: .../libldap.2.dylib).\nif [ -n \"${BUILT_PRODUCTS_DIR}\" ]; then\n  for src in $DYLIBS; do cp -f \"$src\" \"${BUILT_PRODUCTS_DIR}/$(basename \"$src\")\" || true; done\nfi\n\nif [ \"${CODE_SIGNING_ALLOWED}\" = \"NO\" ]; then echo \"note: code signing disabled - skipping dylib bundling\"; exit 0; fi\n\nFW=\"${CODESIGNING_FOLDER_PATH}/Contents/Frameworks\"\nmkdir -p \"$FW\"\n\n# Drop libraries an earlier build bundled that nothing needs any more (an\n# OpenSSL the dependencies have moved on from, say).\nfor old in \"$FW\"/*.dylib; do\n  [ -f \"$old\" ] || continue\n  case \"$NAMES\" in *\" $(basename \"$old\") \"*) ;; *) rm -f \"$old\" ;; esac\ndone\n\nrepoint() {\n  otool -L \"$1\" | tail -n +2 | awk '{print $1}' | while read -r dep; do\n    case \"$dep\" in\n      /opt/homebrew/*|/usr/local/*) install_name_tool -change \"$dep\" \"@rpath/$(basename \"$dep\")\" \"$1\" ;;\n    esac\n  done\n}\n\nfor src in $DYLIBS; do\n  base=\"$(basename \"$src\")\"\n  cp -f \"$src\" \"$FW/$base\"\n  chmod u+w \"$FW/$base\"\n  # Drop Homebrew's ad-hoc signature first so install_name_tool has\n  # nothing to invalidate (Xcode warns otherwise); we re-sign below.\n  codesign --remove-signature \"$FW/$base\" 2>/dev/null || true\n  install_name_tool -id \"@rpath/$base\" \"$FW/$base\"\n  repoint \"$FW/$base\"\ndone\n\nIDENT=\"${EXPANDED_CODE_SIGN_IDENTITY:--}\"\n# An archive is what gets notarized, and notarization wants a secure\n# timestamp on every binary; other builds skip the round trip to Apple.\nTS=\"--timestamp=none\"\nif [ \"$ACTION\" = install ] && [ \"$IDENT\" != \"-\" ]; then TS=\"--timestamp\"; fi\nfor bin in \"$EXE\" \"$MACOS\"/*.dylib; do\n  [ -f \"$bin\" ] || continue\n  repoint \"$bin\"\n  # The executable is signed after this phase; dylibs beside it already\n  # were, and repointing them broke that signature.\n  if [ \"$bin\" != \"$EXE\" ]; then codesign --force --sign \"$IDENT\" \"$TS\" \"$bin\"; fi\ndone\n\n# Fail the build, not the launch: nothing may still load from Homebrew, and\n# only one OpenSSL may be bundled (see the check in core/Makefile).\nfor bin in \"$EXE\" \"$MACOS\"/*.dylib \"$FW\"/*.dylib; do\n  [ -f \"$bin\" ] || continue\n  if otool -L \"$bin\" | tail -n +2 | awk '{print $1}' | grep -qE '^(/opt/homebrew|/usr/local)/'; then\n    echo \"error: $(basename \"$bin\") still loads a library from Homebrew rather than the app bundle\" >&2\n    exit 1\n  fi\ndone\nif [ \"$(ls \"$FW\" | grep -cE '^libcrypto\\.[0-9]+\\.dylib$')\" -gt 1 ]; then\n  echo \"error: more than one OpenSSL bundled ($(ls \"$FW\" | grep -E '^lib(ssl|crypto)\\.' | tr '\\n' ' ')) - the core and Homebrew's openldap/libssh2 must use the same one; see core/Makefile\" >&2\n  exit 1\nfi\n\nfor src in $DYLIBS; do\n  codesign --force --sign \"$IDENT\" --options runtime \"$TS\" \"$FW/$(basename \"$src\")\"\ndone\n";
+			shellScript = "set -e\nexport PATH=\"$PATH:/usr/bin:/opt/homebrew/bin:/usr/local/bin\"\n\n# The libraries the app needs — OpenSSL, libxcrypt, OpenLDAP, libssh2 — come\n# from core/build/deps (built by the \"Build C Core\" phase; see\n# core/deps/build.sh), already linked as @rpath/<name>. Which of them go\n# into the bundle is found by following what links what from the app's own\n# code — the executable and, in Debug builds, the dylibs beside it that\n# actually hold the code (ENABLE_DEBUG_DYLIB, previews) — rather than from\n# a list kept by hand, which once left one out and crashed the app at launch.\n# Only names travel through the walk: every one of them lives at\n# $DEPS/lib/<name>, and the directory may have spaces in it.\nDEPS=\"${SRCROOT}/core/build/deps\"\nMACOS=\"${CODESIGNING_FOLDER_PATH}/Contents/MacOS\"\nEXE=\"$MACOS/${EXECUTABLE_NAME}\"\n\ndeps() { # the names of the libraries from $DEPS/lib that $1 loads\n  otool -L \"$1\" | grep -E '^[[:space:]]' | awk '{print $1}' | while read -r dep; do\n    case \"$dep\" in @rpath/*) if [ -f \"$DEPS/lib/${dep#@rpath/}\" ]; then echo \"${dep#@rpath/}\"; fi ;; esac\n  done\n}\nNAMES=\" \"\nqueue=\"\"\nfor bin in \"$EXE\" \"$MACOS\"/*.dylib; do\n  if [ -f \"$bin\" ]; then queue=\"$queue $(deps \"$bin\")\"; fi\ndone\nwhile [ -n \"$queue\" ]; do\n  next=\"\"\n  for name in $queue; do\n    case \"$NAMES\" in *\" $name \"*) continue ;; esac\n    NAMES=\"$NAMES$name \"\n    next=\"$next $(deps \"$DEPS/lib/$name\")\"\n  done\n  queue=\"$next\"\ndone\n[ \"$NAMES\" != \" \" ] || { echo \"error: found no libraries from $DEPS linked into the app's code in $MACOS\" >&2; exit 1; }\n\n# CA bundle for the bundled OpenSSL: the App Sandbox blocks the path it was\n# built to look in, so ship one in Resources for ls_set_tls_cacert().\n# Copied at every build, not with the libraries, which are built once and\n# cached: Homebrew's ca-certificates (Mozilla's bundle, kept current by\n# brew bundle), or failing that the one macOS ships.\nRES=\"${CODESIGNING_FOLDER_PATH}/Contents/Resources\"\nmkdir -p \"$RES\"\nCACERT=\"$(brew --prefix ca-certificates 2>/dev/null || true)/share/ca-certificates/cacert.pem\"\nif [ -f \"$CACERT\" ]; then\n  cp -f \"$CACERT\" \"$RES/openssl-cacert.pem\"\nelif [ -f /etc/ssl/cert.pem ] && [ -z \"${CI:-}\" ]; then\n  echo \"warning: shipping macOS's /etc/ssl/cert.pem as the CA bundle; brew install ca-certificates for Mozilla's\" >&2\n  cp -f /etc/ssl/cert.pem \"$RES/openssl-cacert.pem\"\nelse\n  # CI and releases run brew bundle first, so there the fallback is a bug.\n  echo \"error: no CA bundle to embed (brew install ca-certificates) - LDAPS would fail in the sandbox\" >&2\n  exit 1\nfi\n\n# SwiftUI Previews JIT-launch the app with DYLD_LIBRARY_PATH forced to\n# BUILT_PRODUCTS_DIR, so the dylibs have to sit there too or every preview\n# in the app target fails to load (Library not loaded: @rpath/libldap.2.dylib).\nif [ -n \"${BUILT_PRODUCTS_DIR}\" ]; then\n  for name in $NAMES; do cp -f \"$DEPS/lib/$name\" \"${BUILT_PRODUCTS_DIR}/$name\" || true; done\nfi\n\nif [ \"${CODE_SIGNING_ALLOWED}\" = \"NO\" ]; then echo \"note: code signing disabled - skipping dylib bundling\"; exit 0; fi\n\nFW=\"${CODESIGNING_FOLDER_PATH}/Contents/Frameworks\"\nmkdir -p \"$FW\"\n\n# Drop libraries an earlier build bundled that nothing needs any more.\nfor old in \"$FW\"/*.dylib; do\n  [ -f \"$old\" ] || continue\n  case \"$NAMES\" in *\" $(basename \"$old\") \"*) ;; *) rm -f \"$old\" ;; esac\ndone\n\nIDENT=\"${EXPANDED_CODE_SIGN_IDENTITY:--}\"\n# An archive is what gets notarized, and notarization wants a secure\n# timestamp on every binary; other builds skip the round trip to Apple.\nTS=\"--timestamp=none\"\nif [ \"$ACTION\" = install ] && [ \"$IDENT\" != \"-\" ]; then TS=\"--timestamp\"; fi\nfor name in $NAMES; do\n  cp -f \"$DEPS/lib/$name\" \"$FW/$name\"\n  chmod u+w \"$FW/$name\"\n  codesign --force --sign \"$IDENT\" --options runtime \"$TS\" \"$FW/$name\"\ndone\n\n# Fail the build, not the launch: everything the app's code and the bundled\n# libraries load must be in the bundle or in macOS, built for every\n# architecture, and able to run on the oldest macOS the app supports — a\n# library built for a newer one is refused by dyld there.\nnewer() { # is $1 a newer version than $2?\n  [ \"$1\" != \"$2\" ] && [ \"$(printf '%s\\n%s\\n' \"$1\" \"$2\" | sort -t. -k1,1n -k2,2n -k3,3n | tail -n 1)\" = \"$1\" ]\n}\n# This script lives escaped inside project.pbxproj; a slip there once\n# turned the comparison into one that never fires.\nnewer 2.0 1.0 && ! newer 1.0 2.0 && ! newer 1.0 1.0 || { echo \"error: the version comparison in this phase is broken\" >&2; exit 1; }\nfor bin in \"$EXE\" \"$MACOS\"/*.dylib \"$FW\"/*.dylib; do\n  [ -f \"$bin\" ] || continue\n  name=\"$(basename \"$bin\")\"\n  otool -L \"$bin\" | grep -E '^[[:space:]]' | awk '{print $1}' | while read -r dep; do\n    case \"$dep\" in\n      /usr/lib/*|/System/*) ;;\n      @rpath/*) [ -e \"$FW/${dep#@rpath/}\" ] || [ -e \"$MACOS/${dep#@rpath/}\" ] || { echo \"error: $name loads $dep, which is not bundled\" >&2; exit 1; } ;;\n      *) echo \"error: $name loads $dep from outside the app bundle\" >&2; exit 1 ;;\n    esac\n  done\n  for arch in $ARCHS; do\n    lipo \"$bin\" -verify_arch \"$arch\" || { echo \"error: $name has no $arch slice\" >&2; exit 1; }\n  done\n  for minos in $(vtool -show-build \"$bin\" | awk '$1 == \"minos\" {print $2}'); do\n    if newer \"$minos\" \"$MACOSX_DEPLOYMENT_TARGET\"; then\n      echo \"error: $name needs macOS $minos, but the app supports $MACOSX_DEPLOYMENT_TARGET\" >&2\n      exit 1\n    fi\n  done\ndone\n";
 			showEnvVarsInLog = 0;
 		};
 /* End PBXShellScriptBuildPhase section */
@@ -247,7 +247,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
-				MACOSX_DEPLOYMENT_TARGET = 26.5;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -307,7 +307,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
-				MACOSX_DEPLOYMENT_TARGET = 26.5;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				SDKROOT = macosx;
@@ -342,12 +342,9 @@
 				);
 				LIBRARY_SEARCH_PATHS = (
 					"$(SRCROOT)/core/build",
-					/opt/homebrew/opt/openldap/lib,
-					"/opt/homebrew/opt/openssl@4/lib",
-					/opt/homebrew/opt/libxcrypt/lib,
-					/opt/homebrew/opt/libssh2/lib,
+					"$(SRCROOT)/core/build/deps/lib",
 				);
-				MACOSX_DEPLOYMENT_TARGET = 27.0;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 1.3.0;
 				OTHER_LDFLAGS = (
 					"$(SRCROOT)/core/build/libldapstudio.a",
@@ -401,12 +398,9 @@
 				);
 				LIBRARY_SEARCH_PATHS = (
 					"$(SRCROOT)/core/build",
-					/opt/homebrew/opt/openldap/lib,
-					"/opt/homebrew/opt/openssl@4/lib",
-					/opt/homebrew/opt/libxcrypt/lib,
-					/opt/homebrew/opt/libssh2/lib,
+					"$(SRCROOT)/core/build/deps/lib",
 				);
-				MACOSX_DEPLOYMENT_TARGET = 27.0;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 1.3.0;
 				OTHER_LDFLAGS = (
 					"$(SRCROOT)/core/build/libldapstudio.a",

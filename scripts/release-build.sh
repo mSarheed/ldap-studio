@@ -7,6 +7,11 @@ set -euo pipefail
 #   ldap-studio-v<version>.dmg   signed, notarized and stapled disk image
 #   ldap-studio-v<version>.zip   the same stapled app, zipped
 #
+# The app is universal (Apple Silicon and Intel) and runs on the macOS the
+# Xcode project's MACOSX_DEPLOYMENT_TARGET names; the libraries it bundles
+# are built from source for both (core/deps/build.sh), which takes a few
+# minutes the first time.
+#
 #   VERSION=1.4.0-beta.1 APPLE_TEAM_ID=ABCDE12345 scripts/release-build.sh
 #
 # Signing identity: with SIGNING_P12_BASE64 and SIGNING_P12_PASSWORD set
@@ -106,15 +111,16 @@ notarize() {
 
 # --- Archive and export --------------------------------------------------------
 
-echo "==> Archiving $NAME $VERSION ($BUILD_NUMBER)"
-# arm64 only: the Homebrew libraries the app bundles are arm64.
+MINIMUM_SYSTEM="$(scripts/deployment-target.sh)"
+echo "==> Archiving $NAME $VERSION ($BUILD_NUMBER) for macOS $MINIMUM_SYSTEM and later, Apple Silicon and Intel"
+# Universal: the libraries the app bundles are built for both (core/deps).
 # Hardened runtime is set here rather than in the project, because it also
 # turns on library validation, which ad-hoc signed local builds can't pass.
 xcodebuild archive \
     -project "$NAME.xcodeproj" -scheme "$NAME" -configuration Release \
     -destination 'generic/platform=macOS' -archivePath "$WORK/$NAME.xcarchive" \
     -derivedDataPath "$WORK/DerivedData" \
-    ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
+    ARCHS="arm64 x86_64" ONLY_ACTIVE_ARCH=NO \
     CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="Developer ID Application" \
     DEVELOPMENT_TEAM="$APPLE_TEAM_ID" ENABLE_HARDENED_RUNTIME=YES \
     OTHER_CODE_SIGN_FLAGS="${SIGN_ARGS[*]}" \
@@ -137,7 +143,7 @@ xcodebuild -exportArchive -archivePath "$WORK/$NAME.xcarchive" \
     -exportOptionsPlist "$WORK/ExportOptions.plist" -exportPath "$WORK/export"
 APP="$WORK/export/$NAME.app"
 
-scripts/release-verify.sh "$APP" "$APPLE_TEAM_ID" "$VERSION" "$BUILD_NUMBER"
+scripts/release-verify.sh "$APP" "$APPLE_TEAM_ID" "$VERSION" "$BUILD_NUMBER" "$MINIMUM_SYSTEM"
 
 if [[ "$SKIP_NOTARIZATION" = 1 ]]; then
     echo "SKIP_NOTARIZATION=1: signed and checked, not notarized; nothing written to dist/"

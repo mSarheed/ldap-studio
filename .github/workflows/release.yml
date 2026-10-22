@@ -92,6 +92,17 @@ jobs:
           persist-credentials: false
       - name: Install dependencies
         run: brew bundle --file=Brewfile
+      # The libraries the app bundles, built from source for both
+      # architectures (core/deps/build.sh); the same cache CI fills.
+      - name: Work out the minimum macOS
+        id: target
+        run: echo "version=$(scripts/deployment-target.sh)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: core/build/deps
+          key: libraries-${{ hashFiles('core/deps/build.sh', 'core/deps/patches/*/*') }}-macos${{ steps.target.outputs.version }}
+      - name: Build the bundled libraries
+        run: make -C core deps ARCHS="arm64 x86_64"
       - name: Archive, sign, notarize and package
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
@@ -127,8 +138,40 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  publish:
+  # The notarized app, launched on every macOS and architecture it's
+  # released for, before anyone is offered it. A dry run gets this too.
+  smoke:
+    name: Launch on ${{ matrix.name }}
     needs: [prepare, build]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: xcode-27, name: "macOS 27, Apple Silicon" }
+          - { runner: macos-26, name: "macOS 26, Apple Silicon" }
+          - { runner: macos-26-intel, name: "macOS 26, Intel" }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: scripts
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ldap-studio-${{ needs.prepare.outputs.tag }}
+          path: dist
+      - name: Launch
+        env:
+          ZIP: dist/ldap-studio-${{ needs.prepare.outputs.tag }}.zip
+        run: |
+          ditto -x -k "$ZIP" "$RUNNER_TEMP/app"
+          scripts/launch-check.sh "$RUNNER_TEMP/app/ldap-studio.app"
+
+  publish:
+    needs: [prepare, build, smoke]
     if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-latest
     timeout-minutes: 10

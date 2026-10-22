@@ -72,12 +72,20 @@ Results are capped in size, so a broad search can't flood an agent's context. Ag
 
 ## Testing Against a Large Directory
 
-`scripts/test-server/run.sh start` runs a local OpenLDAP server (from the Homebrew `openldap` in the Brewfile) with about 150,000 entries, one OU with 76,000 direct children, a 30-level-deep branch, and an Active Directory-like 500-entry size limit. `scripts/test-server/check.sh` then exercises browsing, searching, branch operations and the MCP server against it. See the comments in `run.sh` for the accounts to bind as.
+`scripts/test-server/run.sh start` runs a local OpenLDAP server (the `slapd` built along with the libraries the app bundles, see below) with about 150,000 entries, one OU with 76,000 direct children, a 30-level-deep branch, and an Active Directory-like 500-entry size limit. `scripts/test-server/check.sh` then exercises browsing, searching, branch operations and the MCP server against it. See the comments in `run.sh` for the accounts to bind as.
 
 ## Requirements
 
-- macOS 27 (Golden Gate) or later
-- Apple Silicon (arm64); there's currently no Intel build
+- macOS 26 (Tahoe) or later
+- Apple Silicon or Intel: every release is one universal app
+
+(Releases up to and including 1.4.2-beta.6 were built for Apple Silicon only and need macOS 27.)
+
+## Building
+
+Open `ldap-studio.xcodeproj` in Xcode and build, or run `scripts/build.sh` for a Release app zipped into `dist/`. The first build takes a few minutes longer than the rest: the libraries the app bundles — OpenSSL, libxcrypt, OpenLDAP and libssh2 — are built from source by [`core/deps/build.sh`](core/deps/build.sh) (run by the "Build C Core" phase, or `make -C core deps`) for the architectures being built and the app's minimum macOS, then kept in `core/build/deps`. Homebrew's bottles can't be bundled: they only run on the macOS they were built on, and there are none for Intel any more. The versions, options and security patches follow Homebrew's formulae; bump them there when Homebrew does. `brew bundle` installs the CA bundle the app ships and the tools editors use.
+
+Releases are universal (Apple Silicon and Intel) and run on the macOS named by `MACOSX_DEPLOYMENT_TARGET` in the Xcode project, which is the one place it's set: the libraries are built for it, and a release is checked against it. CI builds the app universal, launches it on macOS 27 and on macOS 26 on both kinds of Mac, and runs the test-server checks on all three.
 
 ## Releasing
 
@@ -91,7 +99,7 @@ Releases are built, signed, notarized and published by [`.github/workflows/relea
 
 A release must be newer than the latest stable one. Its notes are generated from the pull requests merged since the previous release (for a stable release, since the previous stable one, so they cover its betas too); label a PR `skip-changelog` to leave it out. The app's version comes from the tag (`MARKETING_VERSION`), and its build number is the workflow's run number.
 
-`scripts/release-build.sh` does the work: it archives the app, exports it signed with Developer ID and hardened runtime, checks it with `scripts/release-verify.sh` (every binary signed by the team with a secure timestamp, no debugging entitlement, nothing linked from outside the bundle), notarizes and staples the app, then builds, signs, notarizes and staples the DMG. It also runs locally with your own Developer ID identity; see the comments at the top for the notarization settings, or set `SKIP_NOTARIZATION=1` to stop after signing.
+`scripts/release-build.sh` does the work: it archives the app, exports it signed with Developer ID and hardened runtime, checks it with `scripts/release-verify.sh` (every binary signed by the team with a secure timestamp, built for both architectures and for no newer a macOS than the app's minimum, no debugging entitlement, nothing linked from outside the bundle), notarizes and staples the app, then builds, signs, notarizes and staples the DMG. Before anything is published, the notarized app is launched on macOS 27 and on macOS 26 on Apple Silicon and Intel. It also runs locally with your own Developer ID identity; see the comments at the top for the notarization settings, or set `SKIP_NOTARIZATION=1` to stop after signing.
 
 The ZIP is also the in-app update. The workflow signs it with the Sparkle key, and once the release is published, adds it to [`appcast.xml`](appcast.xml) on `main` (a beta on the `beta` channel) with `scripts/release-appcast.py`. That file is the feed installed apps check, so a release reaches them only once it's there.
 
