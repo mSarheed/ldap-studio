@@ -172,7 +172,9 @@ final class MCPTools {
         } catch is CancellationError {
             return ("Cancelled.", true)
         } catch {
-            return ("\(error)", true)
+            // Errors can quote what the agent or the server sent.
+            let message = "\(error)"
+            return (message.utf8.count <= 4096 ? message : String(message.prefix(2000)) + "…", true)
         }
     }
 
@@ -423,6 +425,7 @@ final class MCPTools {
         guard let name = try args.string("connection"), !name.isEmpty else {
             throw ToolError("connection is required — call list_connections for the names.")
         }
+        guard name.count <= 256 else { throw ToolError("No connection has a name that long — call list_connections for the names.") }
         let shared = shared
         guard let connection = shared.first(where: { $0.name == name })
             ?? shared.first(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) else {
@@ -487,7 +490,7 @@ final class MCPTools {
         var hidden: [String] = []
         var bytes = entry.dn.utf8.count + 128
         for attribute in entry.attributes {
-            let shown = unresolved == .show ? !policy.isHidden(attribute.name) : policy.isShown(attribute.name)
+            let shown = unresolved == .show ? policy.isShownInRootDSE(attribute.name) : policy.isShown(attribute.name)
             if !shown {
                 if !hidden.contains(attribute.name) { hidden.append(attribute.name) }
                 continue

@@ -162,6 +162,15 @@ func count(_ value: JSONValue?, _ key: String) -> Int {
     let bigHeader = "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\nX-Big: \(String(repeating: "a", count: 20_000))\r\n\r\n"
     check(await raw(Data(bigHeader.utf8))?.status == 431, "oversized headers → 431")
     check(await post("{not json")?.status == 400, "malformed JSON → 400")
+    // Nesting is refused quickly rather than tying up the app.
+    let clock = ContinuousClock()
+    let deep = #"{"jsonrpc":"2.0","id":3,"method":"ping","params":{"x":"# + String(repeating: "[", count: 8000)
+        + String(repeating: "]", count: 8000) + "}}"
+    var started = clock.now
+    check(await post(deep)?.status == 400 && clock.now - started < .seconds(2), "8,000-deep nesting → 400, quickly")
+    let wide = #"{"jsonrpc":"2.0","id":4,"method":"ping","params":{"x":["# + Array(repeating: String(repeating: "[", count: 16) + "1" + String(repeating: "]", count: 16), count: 400).joined(separator: ",") + "]}}"
+    started = clock.now
+    check(await post(wide)?.status == 200 && clock.now - started < .seconds(2), "\(wide.utf8.count / 1024) KB of 16-deep arrays parses quickly")
     let continued = await post(initialize, extra: ["Expect: 100-continue"])
     check(continued?.status == 100 || continued?.status == 200, "Expect: 100-continue is answered")
 
@@ -224,6 +233,8 @@ func count(_ value: JSONValue?, _ key: String) -> Int {
     check(notShared?.isError == true && notShared?.text.contains("Shared connections") == true,
           "a connection that isn't shared is refused: \(notShared?.text ?? "nil")")
     check(await tool("search", [:])?.isError == true, "connection is required")
+    let longName = await tool("search", ["connection": .string(String(repeating: "x", count: 900_000))])
+    check(longName?.isError == true && (longName?.text.utf8.count ?? .max) < 5000, "errors don't echo huge arguments back")
 
     let info = await tool("get_server_info", ["connection": "Reader"])
     check(info?.text.contains("dc=example,dc=com") == true && info?.isError == false, "get_server_info lists the naming contexts")
@@ -297,6 +308,14 @@ func count(_ value: JSONValue?, _ key: String) -> Int {
           "no schema: only objectClass values are shown, since aliases can't be told apart")
     check(MCPAttributePolicy(extraHidden: ["mail;lang-en"], schema: nil).isHidden("mail"),
           "hiding an attribute with options hides the whole attribute")
+    check(MCPAttributePolicy(schema: nil).isHidden("olcDbPass") && MCPAttributePolicy(schema: nil).isHidden("olcSyncrepl"),
+          "server configuration credentials are hidden")
+    check(!MCPAttributePolicy(extraHidden: ["2.5.4.0"], schema: nil).isShown("objectClass"),
+          "no schema: objectClass hidden by its OID stays hidden")
+    let saslOID = "1.3.6.1.4.1.1466.101.120.14"
+    check(!MCPAttributePolicy(extraHidden: [saslOID], schema: nil).isShownInRootDSE("supportedSASLMechanisms")
+          && MCPAttributePolicy(schema: nil).isShownInRootDSE("supportedSASLMechanisms"),
+          "root DSE: unknown names are withheld while a hidden OID can't be resolved")
     let emptySchema = MCPAttributePolicy(schema: LdapSchema(objectClasses: [], attributeTypes: []))
     check(!emptySchema.knowsSchema && (try? emptySchema.check("2.5.4.3")) == nil, "an empty schema counts as none")
 

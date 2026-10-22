@@ -38,7 +38,9 @@ final class MCPEndpoint {
     }
 
     func handle(_ body: Data) async -> MCPHTTPResponse {
-        guard let message = try? JSONValue.decode(body) else {
+        // Parsed off the main actor: a megabyte of JSON shouldn't stall the UI.
+        let parsed = await Task.detached(priority: .userInitiated) { try? JSONValue.decode(body) }.value
+        guard let message = parsed else {
             return MCPHTTPResponse(status: 400, body: Self.error(id: .null, code: -32700, "Parse error").encoded())
         }
         if case let .array(batch) = message {
@@ -94,7 +96,7 @@ final class MCPEndpoint {
             return Self.result(id: id, ["tools": .array(MCPTools.definitions)])
         case "tools/call":
             guard case let .string(name)? = params["name"], MCPTools.toolNames.contains(name) else {
-                return Self.error(id: id, code: -32602, "Unknown tool: \(params["name"]?.stringValue ?? "(none)")")
+                return Self.error(id: id, code: -32602, "Unknown tool: \((params["name"]?.stringValue ?? "(none)").prefix(100))")
             }
             let arguments: [String: JSONValue]
             switch params["arguments"] {
@@ -108,7 +110,7 @@ final class MCPEndpoint {
                 "isError": .bool(isError),
             ])
         default:
-            return Self.error(id: id, code: -32601, "Method not found: \(method)")
+            return Self.error(id: id, code: -32601, "Method not found: \(method.prefix(100))")
         }
     }
 

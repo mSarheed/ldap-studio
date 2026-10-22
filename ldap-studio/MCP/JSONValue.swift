@@ -8,7 +8,7 @@
 
 import Foundation
 
-nonisolated enum JSONValue: Sendable, Equatable, Codable {
+nonisolated enum JSONValue: Sendable, Equatable, Encodable {
     case null
     case bool(Bool)
     case int(Int)
@@ -16,25 +16,6 @@ nonisolated enum JSONValue: Sendable, Equatable, Codable {
     case string(String)
     case array([JSONValue])
     case object([String: JSONValue])
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.singleValueContainer()
-        if container.decodeNil() {
-            self = .null
-        } else if let value = try? container.decode(Bool.self) {
-            self = .bool(value)
-        } else if let value = try? container.decode(Int.self) {
-            self = .int(value)
-        } else if let value = try? container.decode(Double.self) {
-            self = .double(value)
-        } else if let value = try? container.decode(String.self) {
-            self = .string(value)
-        } else if let value = try? container.decode([JSONValue].self) {
-            self = .array(value)
-        } else {
-            self = .object(try container.decode([String: JSONValue].self))
-        }
-    }
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.singleValueContainer()
@@ -73,8 +54,37 @@ nonisolated enum JSONValue: Sendable, Equatable, Codable {
 
     var encodedString: String { String(decoding: encoded(), as: UTF8.self) }
 
+    struct DecodingError: Error {}
+
+    /// Deeper than this is refused; MCP messages are a few levels deep.
+    static let maxDepth = 64
+
+    /// Parses with JSONSerialization — one linear pass. (Decoding this
+    /// enum with Decodable means trying each case in turn, which on nested
+    /// input backtracks exponentially: a 16 KB request took seconds.)
     static func decode(_ data: Data) throws -> JSONValue {
-        try JSONDecoder().decode(JSONValue.self, from: data)
+        let object = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
+        return try convert(object, depth: 0)
+    }
+
+    private static func convert(_ object: Any, depth: Int) throws -> JSONValue {
+        guard depth <= maxDepth else { throw DecodingError() }
+        switch object {
+        case is NSNull:
+            return .null
+        case let string as String:
+            return .string(string)
+        case let number as NSNumber:
+            if CFGetTypeID(number) == CFBooleanGetTypeID() { return .bool(number.boolValue) }
+            if CFNumberIsFloatType(number) { return .double(number.doubleValue) }
+            return .int(number.intValue)
+        case let array as [Any]:
+            return .array(try array.map { try convert($0, depth: depth + 1) })
+        case let dictionary as [String: Any]:
+            return .object(try dictionary.mapValues { try convert($0, depth: depth + 1) })
+        default:
+            throw DecodingError()
+        }
     }
 }
 

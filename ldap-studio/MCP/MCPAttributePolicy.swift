@@ -33,7 +33,7 @@ nonisolated struct MCPAttributePolicy: Sendable {
         "currentValue", "priorValue",
         // OpenLDAP configuration (cn=config): root and replication/proxy
         // bind credentials
-        "olcRootPW", "olcSyncrepl", "olcDbACLPasswd", "olcDbIDAssertBind",
+        "olcRootPW", "olcSyncrepl", "olcDbACLPasswd", "olcDbACLBind", "olcDbIDAssertBind", "olcDbPass",
         // 389 Directory Server
         "nsslapd-rootpw", "nsds5ReplicaCredentials", "nsDS5ReplicaBootstrapCredentials",
         "nsMultiplexorCredentials", "nsSymmetricKey",
@@ -54,6 +54,13 @@ nonisolated struct MCPAttributePolicy: Sendable {
     /// Active Directory's anr, by name and OID: it searches whatever set of
     /// attributes the server is configured with.
     private let ambiguousNameResolution: Set<String>
+    /// A hidden attribute was given as an OID the policy can't put a name
+    /// to, so an attribute it doesn't know might be that one.
+    private let hasUnresolvedHiddenOIDs: Bool
+
+    /// OIDs of the attributes named without a schema to resolve them —
+    /// objectClass, which is always allowed, and userPassword.
+    private static let wellKnownOIDs = ["2.5.4.0": "objectclass", "2.5.4.35": "userpassword"]
     /// The server's schema was read (and isn't empty), so names can be
     /// resolved. Without it, nothing but objectClass is accepted.
     let knowsSchema: Bool
@@ -62,7 +69,9 @@ nonisolated struct MCPAttributePolicy: Sendable {
         // "mail;lang-en" hides all of mail: options don't make a separate
         // attribute, and matching ignores them.
         var hidden = Set((Self.alwaysHidden + extraHidden).map(Self.baseName))
-        hidden.insert("2.5.4.35") // userPassword, whatever else is known
+        for (oid, name) in Self.wellKnownOIDs where hidden.contains(oid) || hidden.contains(name) {
+            hidden.formUnion([oid, name])
+        }
         var supertypes = Set<String>()
         var known = Set<String>()
         var anr: Set<String> = ["anr"]
@@ -102,6 +111,7 @@ nonisolated struct MCPAttributePolicy: Sendable {
             }
         }
         self.hidden = hidden
+        hasUnresolvedHiddenOIDs = hidden.contains { Self.isNumericOID($0) && !known.contains($0) && Self.wellKnownOIDs[$0] == nil }
         hiddenSupertypes = supertypes.subtracting(hidden)
         self.known = known
         ambiguousNameResolution = anr
@@ -111,6 +121,10 @@ nonisolated struct MCPAttributePolicy: Sendable {
     /// "member;range=0-1499" → "member".
     static func baseName(_ description: String) -> String {
         String(description.prefix { $0 != ";" }).lowercased()
+    }
+
+    static func isNumericOID(_ name: String) -> Bool {
+        name.first?.isNumber == true && name.allSatisfy { ($0.isASCII && $0.isNumber) || $0 == "." }
     }
 
     func isHidden(_ description: String) -> Bool {
@@ -124,6 +138,16 @@ nonisolated struct MCPAttributePolicy: Sendable {
     func isShown(_ description: String) -> Bool {
         let name = Self.baseName(description)
         return !hidden.contains(name) && (name == "objectclass" || known.contains(name))
+    }
+
+    /// Looser, for the root DSE, which describes the server rather than
+    /// holding directory data, and on Active Directory is mostly outside
+    /// the schema: a name the schema doesn't know is shown too — unless a
+    /// hidden attribute was given as an OID that couldn't be resolved, in
+    /// which case it might be that one.
+    func isShownInRootDSE(_ description: String) -> Bool {
+        let name = Self.baseName(description)
+        return !hidden.contains(name) && (known.contains(name) || !hasUnresolvedHiddenOIDs)
     }
 
     /// What an attribute name an agent passed may look like: a name or a
