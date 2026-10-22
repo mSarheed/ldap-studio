@@ -154,7 +154,7 @@ nonisolated struct MCPAttributePolicy: Sendable {
     /// numeric OID, with options. Rules out anything that could be read as
     /// something else by the server.
     static func isWellFormed(_ description: String) -> Bool {
-        guard let first = description.unicodeScalars.first, description.count <= 256 else { return false }
+        guard let first = description.unicodeScalars.first, description.utf8.count <= 256 else { return false }
         let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_.;"))
         return CharacterSet.alphanumerics.contains(first)
             && description.unicodeScalars.allSatisfy { $0.isASCII && allowed.contains($0) }

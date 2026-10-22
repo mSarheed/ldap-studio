@@ -193,6 +193,14 @@ func count(_ value: JSONValue?, _ key: String) -> Int {
     check(futureReply?["result"]?["protocolVersion"] == .string(MCPEndpoint.protocolVersions[0]), "unknown protocol version → the newest supported")
     check(await post(#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)?.status == 202, "notification → 202")
     check(await rpc("ping")?["result"] == [:], "ping")
+    func reply(_ body: String) async -> JSONValue? { try? JSONValue.decode(await post(body)?.body ?? Data()) }
+    check(await reply(#"{"jsonrpc":"2.0","id":42.0,"method":"ping"}"#)?["id"] == 42, "an integral id like 42.0 is accepted as 42")
+    let bigID = await reply(#"{"jsonrpc":"2.0","id":9223372036854775808,"method":"ping"}"#)
+    check(bigID?["error"]?["code"] == -32600 && bigID?["id"] == .null, "an id too large for an integer is refused, not changed")
+    check(await reply(#"{"jsonrpc":"2.0","id":-9223372036854775808,"method":"ping"}"#)?["id"] == .int(Int.min), "Int.min id comes back unchanged")
+    let accents = "a" + String(repeating: "\u{301}", count: 200_000)
+    let longMethod = await post((["jsonrpc": "2.0", "id": 9, "method": .string(accents)] as JSONValue).encodedString)
+    check(longMethod?.status == 200 && (longMethod?.body.count ?? .max) < 1000, "a huge method name isn't echoed back")
     let unknownMethod = await rpc("resources/list")
     check(unknownMethod?["error"]?["code"] == -32601, "unoffered method → method not found")
     let batch = #"[{"jsonrpc":"2.0","id":7,"method":"ping"},{"jsonrpc":"2.0","method":"notifications/initialized"}]"#
@@ -235,6 +243,10 @@ func count(_ value: JSONValue?, _ key: String) -> Int {
     check(await tool("search", [:])?.isError == true, "connection is required")
     let longName = await tool("search", ["connection": .string(String(repeating: "x", count: 900_000))])
     check(longName?.isError == true && (longName?.text.utf8.count ?? .max) < 5000, "errors don't echo huge arguments back")
+    let accented = await tool("search", ["connection": .string("a" + String(repeating: "\u{301}", count: 200_000))])
+    check(accented?.isError == true && (accented?.text.utf8.count ?? .max) < 5000, "…measured in bytes, not characters")
+    let accentedScope = await tool("search", ["connection": "Reader", "scope": .string("a" + String(repeating: "\u{301}", count: 200_000))])
+    check(accentedScope?.isError == true && (accentedScope?.text.utf8.count ?? .max) <= 4100, "every tool error is capped")
 
     let info = await tool("get_server_info", ["connection": "Reader"])
     check(info?.text.contains("dc=example,dc=com") == true && info?.isError == false, "get_server_info lists the naming contexts")
@@ -298,6 +310,10 @@ func count(_ value: JSONValue?, _ key: String) -> Int {
     let hiddenClasses = await tool("list_children", ["connection": "Reader", "dn": "ou=People,dc=example,dc=com", "limit": 3])
     check(count(hiddenClasses?.json, "children") == 3 && hiddenClasses?.text.contains("object_classes") == false
           && hiddenClasses?.text.contains("inetOrgPerson") == false, "list_children leaves out a hidden objectClass")
+    extraHidden = ["namingContexts"]
+    let hiddenContexts = await tool("list_children", ["connection": "Reader", "dn": ""])
+    check(hiddenContexts?.isError == true && hiddenContexts?.text.contains("dc=example") == false,
+          "list_children of \"\" respects hidden namingContexts")
     extraHidden = ["mail"]
 
     // Without a schema, nothing but objectClass can be named.

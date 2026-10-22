@@ -96,7 +96,7 @@ final class MCPEndpoint {
             return Self.result(id: id, ["tools": .array(MCPTools.definitions)])
         case "tools/call":
             guard case let .string(name)? = params["name"], MCPTools.toolNames.contains(name) else {
-                return Self.error(id: id, code: -32602, "Unknown tool: \((params["name"]?.stringValue ?? "(none)").prefix(100))")
+                return Self.error(id: id, code: -32602, "Unknown tool: \(JSONValue.truncated(params["name"]?.stringValue ?? "(none)", maxBytes: 100))")
             }
             let arguments: [String: JSONValue]
             switch params["arguments"] {
@@ -110,7 +110,7 @@ final class MCPEndpoint {
                 "isError": .bool(isError),
             ])
         default:
-            return Self.error(id: id, code: -32601, "Method not found: \(method.prefix(100))")
+            return Self.error(id: id, code: -32601, "Method not found: \(JSONValue.truncated(method, maxBytes: 100))")
         }
     }
 

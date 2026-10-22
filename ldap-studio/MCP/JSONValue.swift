@@ -54,6 +54,21 @@ nonisolated enum JSONValue: Sendable, Equatable, Encodable {
 
     var encodedString: String { String(decoding: encoded(), as: UTF8.self) }
 
+    /// At most `maxBytes` of UTF-8, cut at a scalar boundary — for text
+    /// that quotes what a client sent. (Counting Characters isn't enough:
+    /// one letter with 400,000 combining accents is a single Character.)
+    static func truncated(_ text: some StringProtocol, maxBytes: Int) -> String {
+        guard text.utf8.count > maxBytes else { return String(text) }
+        var result = String.UnicodeScalarView()
+        var bytes = 0
+        for scalar in text.unicodeScalars {
+            bytes += String(scalar).utf8.count
+            guard bytes <= maxBytes else { break }
+            result.append(scalar)
+        }
+        return String(result) + "…"
+    }
+
     struct DecodingError: Error {}
 
     /// Deeper than this is refused; MCP messages are a few levels deep.
@@ -76,8 +91,20 @@ nonisolated enum JSONValue: Sendable, Equatable, Encodable {
             return .string(string)
         case let number as NSNumber:
             if CFGetTypeID(number) == CFBooleanGetTypeID() { return .bool(number.boolValue) }
-            if CFNumberIsFloatType(number) { return .double(number.doubleValue) }
-            return .int(number.intValue)
+            // Whole numbers become .int only when that's exact — 42.0 is 42,
+            // but 2^63 (which Int can't hold) stays a double rather than
+            // wrapping, so a request id is never silently changed.
+            if CFNumberIsFloatType(number) {
+                let value = number.doubleValue
+                if value.rounded() == value, abs(value) < 9_007_199_254_740_992 { return .int(Int(value)) }
+                return .double(value)
+            }
+            var value: Int64 = 0
+            guard CFNumberGetValue(number, .sInt64Type, &value),
+                  number.compare(NSNumber(value: value)) == .orderedSame else {
+                return .double(number.doubleValue)
+            }
+            return .int(Int(value))
         case let array as [Any]:
             return .array(try array.map { try convert($0, depth: depth + 1) })
         case let dictionary as [String: Any]:

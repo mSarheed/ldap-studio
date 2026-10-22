@@ -173,8 +173,7 @@ final class MCPTools {
             return ("Cancelled.", true)
         } catch {
             // Errors can quote what the agent or the server sent.
-            let message = "\(error)"
-            return (message.utf8.count <= 4096 ? message : String(message.prefix(2000)) + "…", true)
+            return (JSONValue.truncated("\(error)", maxBytes: 4096), true)
         }
     }
 
@@ -308,6 +307,9 @@ final class MCPTools {
         var rows: [TreeRow] = []
         var isComplete = true
         if dn.isEmpty {
+            guard policy.isShownInRootDSE("namingContexts") else {
+                throw ToolError("The server's naming contexts are hidden from agents. Pass a dn to list.")
+            }
             let dse = try await directory.entry(dn: "", attributes: ["namingContexts"])
             let contexts = dse?.values("namingContexts") ?? []
             for context in contexts.prefix(limit) {
@@ -425,7 +427,7 @@ final class MCPTools {
         guard let name = try args.string("connection"), !name.isEmpty else {
             throw ToolError("connection is required — call list_connections for the names.")
         }
-        guard name.count <= 256 else { throw ToolError("No connection has a name that long — call list_connections for the names.") }
+        guard name.utf8.count <= 1024 else { throw ToolError("No connection has a name that long — call list_connections for the names.") }
         let shared = shared
         guard let connection = shared.first(where: { $0.name == name })
             ?? shared.first(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) else {
