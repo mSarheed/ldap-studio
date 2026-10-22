@@ -299,7 +299,11 @@ func connection(_ bind: String, _ pw: String, base: String = "dc=example,dc=com"
     // filter parser
     check((try? LDAPFilterParser.parse("(&(uid=a*)(!(cn=b))(|(mail=*x*)(sn>=c)))")) != nil, "parser: nested filter")
     check((try? LDAPFilterParser.parse("(member:1.2.840.113556.1.4.1941:=cn=x)")) != nil, "parser: extensible match")
-    for bad in ["(uid=a", "(uid=a))", "(=a)", "(uid~a)", "(uid>=a*)", "(cn=a(b)", "(cn=\\4)", "(&(uid=a)x)"] {
+    for good in ["(cn:dn:2.5.13.5:=a)", "(:caseExactMatch:=a)", "(:dn:2.5.13.5:=a)", "(cn;lang-en=a)", "(2.5.4.3=a)"] {
+        check((try? LDAPFilterParser.parse(good)) != nil, "parser accepts \(good)")
+    }
+    for bad in ["(uid=a", "(uid=a))", "(=a)", "(uid~a)", "(uid>=a*)", "(cn=a(b)", "(cn=\\4)", "(&(uid=a)x)",
+                "(1abc=foo)", "(cn:bogus:extra:=foo)", "(:dn:=foo)", "(cn;=a)", "(cn:=)x"] {
         check((try? LDAPFilterParser.parse(bad)) == nil, "parser rejects \(bad)")
     }
     if let parsed = LDAPFilterParser.conditions(from: "(|(mail=*@cbpf.br)(!(uid=a\\2ab))(cn=*mid*)(sn=*))") {

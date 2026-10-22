@@ -294,7 +294,8 @@ struct DirectoryTreeView: View {
                 let isClick = newValue == rowContext.pickedInList
                 rowContext.pickedInList = nil
                 guard !isClick else { return }
-                if tree.node(newValue) != nil {
+                // Not while the table is up: it stands in for the entry.
+                if !isShowingSearchResults, tree.node(newValue) != nil {
                     setTreeSelection([newValue])
                 }
                 withAnimation {
@@ -302,7 +303,9 @@ struct DirectoryTreeView: View {
                 }
             }
             .onAppear {
-                if !isShowingSearchResults, let selection, tree.node(selection) != nil {
+                if isShowingSearchResults {
+                    setTreeSelection([])
+                } else if let selection, tree.node(selection) != nil {
                     setTreeSelection([selection])
                 }
                 updateRowContext()

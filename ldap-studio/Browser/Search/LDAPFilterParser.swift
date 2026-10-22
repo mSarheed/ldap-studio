@@ -207,14 +207,15 @@ nonisolated enum LDAPFilterParser {
             if comparison == .extensible {
                 attribute.removeLast()
             }
-            let name = comparison == .extensible ? attribute.split(separator: ":").first.map(String.init) ?? "" : attribute
-            guard comparison == .extensible ? !attribute.isEmpty : !name.isEmpty else {
-                throw LDAPFilterError(message: "Expected an attribute name", offset: start)
-            }
-            let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-.;:"))
-            guard attribute.unicodeScalars.allSatisfy({ allowed.contains($0) }),
-                  comparison == .extensible || !attribute.contains(":") else {
-                throw LDAPFilterError(message: "“\(attribute)” isn’t a valid attribute name", offset: start)
+            if comparison == .extensible {
+                try Self.checkExtensible(attribute, at: start)
+            } else {
+                guard !attribute.isEmpty else {
+                    throw LDAPFilterError(message: "Expected an attribute name", offset: start)
+                }
+                guard Self.isAttributeDescription(attribute) else {
+                    throw LDAPFilterError(message: "“\(attribute)” isn’t a valid attribute name", offset: start)
+                }
             }
 
             var value = ""
@@ -238,6 +239,48 @@ nonisolated enum LDAPFilterParser {
                 position += 1
             }
             return .item(attribute: attribute, comparison: comparison, value: value)
+        }
+
+        /// `attr[:dn][:rule]` or `[:dn]:rule` — what comes before `:=`.
+        private static func checkExtensible(_ text: String, at offset: Int) throws(LDAPFilterError) {
+            var parts = text.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
+            let attribute = parts.removeFirst()
+            if !attribute.isEmpty, !isAttributeDescription(attribute) {
+                throw LDAPFilterError(message: "“\(attribute)” isn’t a valid attribute name", offset: offset)
+            }
+            if parts.first?.lowercased() == "dn" { parts.removeFirst() }
+            if parts.count > 1 || parts.first?.isEmpty == true {
+                throw LDAPFilterError(message: "Expected “attribute:dn:rule:=” in “\(text):=”", offset: offset)
+            }
+            if let rule = parts.first, !isOID(rule) {
+                throw LDAPFilterError(message: "“\(rule)” isn’t a valid matching rule", offset: offset)
+            }
+            if attribute.isEmpty, parts.isEmpty {
+                throw LDAPFilterError(message: "A match without an attribute needs a matching rule", offset: offset)
+            }
+        }
+
+        /// RFC 4512: a name or numeric OID, then any `;options`.
+        static func isAttributeDescription(_ text: String) -> Bool {
+            let parts = text.split(separator: ";", omittingEmptySubsequences: false)
+            guard let type = parts.first, isOID(String(type)) else { return false }
+            return parts.dropFirst().allSatisfy { option in
+                !option.isEmpty && option.unicodeScalars.allSatisfy { $0.isASCII && (CharacterSet.alphanumerics.contains($0) || $0 == "-") }
+            }
+        }
+
+        /// A descriptor (`cn`, `user-Name`) or a numeric OID (`2.5.4.3`).
+        static func isOID(_ text: String) -> Bool {
+            let scalars = Array(text.unicodeScalars)
+            guard let first = scalars.first, first.isASCII else { return false }
+            if CharacterSet.letters.contains(first) {
+                return scalars.allSatisfy { $0.isASCII && (CharacterSet.alphanumerics.contains($0) || $0 == "-") }
+            }
+            let numbers = text.split(separator: ".", omittingEmptySubsequences: false)
+            return numbers.count > 1 && numbers.allSatisfy { number in
+                !number.isEmpty && number.allSatisfy(\.isASCII) && number.allSatisfy(\.isNumber)
+                    && (number == "0" || !number.hasPrefix("0"))
+            }
         }
 
         private mutating func expect(_ character: Character) throws(LDAPFilterError) {
