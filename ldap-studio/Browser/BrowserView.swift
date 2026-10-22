@@ -18,6 +18,7 @@ struct BrowserView: View {
         self.connection = connection
         _tree = State(initialValue: DirectoryTree(connection: connection))
         _operations = State(initialValue: BranchOperations(connection: connection))
+        _searchOperations = State(initialValue: BranchOperations(connection: connection))
     }
 
     /// The lazily loaded directory tree — see DirectoryTree.swift.
@@ -51,6 +52,11 @@ struct BrowserView: View {
     /// its results are one click away.
     @State private var searchSession: SearchSession?
     @State private var isShowingSearch = false
+    /// Export / move / delete of search results. Shown over the whole
+    /// window, like `operations`, so a delete keeps its progress and Cancel
+    /// when an entry is opened meanwhile — but it leaves the selection
+    /// alone, where `operations` selects what it moved.
+    @State private var searchOperations: BranchOperations
 
     private var endpoint: String { connection.endpoint }
 
@@ -60,9 +66,14 @@ struct BrowserView: View {
             OperationLogStrip(endpoint: endpoint)
         }
         .branchOperations(operations)
-        .onDisappear { tree.cancelAll() }
+        .branchOperations(searchOperations)
+        .onDisappear {
+            tree.cancelAll()
+            searchSession?.stop()
+        }
         .onAppear {
             operations.onChange = { change in await apply(change) }
+            searchOperations.onChange = { change in await apply(change) }
             operations.onSelect = { dn in
                 Task {
                     _ = try? await tree.reveal(dn)
@@ -135,6 +146,7 @@ struct BrowserView: View {
             tree = DirectoryTree(connection: connection)
             schema = nil
             operations.schema = nil
+            searchOperations.schema = nil
             searchSession?.stop()
             searchSession = nil
             isShowingSearch = false
@@ -153,6 +165,7 @@ struct BrowserView: View {
             // `isReadOnly`, for one.
             tree.connection = connection
             operations.connection = connection
+            searchOperations.connection = connection
         }
         .sheet(isPresented: $isShowingCertTrust) {
             CertificateTrustSheet(
@@ -228,9 +241,9 @@ struct BrowserView: View {
                 tree: tree,
                 schema: schema,
                 selectedDN: selection,
+                operations: searchOperations,
                 onOpen: { dn in openFromSearch(dn) },
                 onClose: { isShowingSearch = false },
-                onChange: { change in await apply(change) },
                 onEditSavedSearches: editSavedSearches
             )
             .id(ObjectIdentifier(searchSession))
@@ -390,6 +403,7 @@ struct BrowserView: View {
         guard generation == loadGeneration else { return }
         schema = loadedSchema
         operations.schema = loadedSchema
+        searchOperations.schema = loadedSchema
         loadError = nil
     }
 

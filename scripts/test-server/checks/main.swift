@@ -312,6 +312,12 @@ func connection(_ bind: String, _ pw: String, base: String = "dc=example,dc=com"
         check(false, "parser: OR of comparisons becomes conditions")
     }
     check(LDAPFilterParser.conditions(from: "(&(uid=a)(|(cn=b)(cn=c)))") == nil, "parser: nested filter isn't shown as conditions")
+    check(LDAPFilterParser.conditions(from: "(description=)") == nil, "parser: an empty value isn't shown as a condition")
+    let saved = SavedSearches.pinning(SearchQuery(rawFilter: "(cn=a)", baseDN: "ou=A"), filter: "(cn=a)",
+                                      name: "In A", in: [])
+    let afterB = SavedSearches.recording(SearchQuery(rawFilter: "(cn=a)", baseDN: "ou=B"), filter: "(cn=a)", in: saved)
+    check(afterB.count == 2 && afterB.first { $0.isPinned }?.query?.baseDN == "ou=A",
+          "saved searches: the same filter in another branch doesn't overwrite a saved one")
     check(SearchQuery.value("ana.duarte@cbpf.br", matches: "ana") && !SearchQuery.value("Juliana", matches: "ana")
           && SearchQuery.value("user0599", matches: "user*99"), "search: matched-attribute check follows the server")
 

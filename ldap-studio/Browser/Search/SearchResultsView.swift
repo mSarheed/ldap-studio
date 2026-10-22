@@ -17,34 +17,18 @@ struct SearchResultsView: View {
     let schema: LdapSchema?
     /// The entry selected in the tree, offered as a place to search in.
     let selectedDN: String?
+    /// Export / move / delete; `BrowserView` shows their progress.
+    let operations: BranchOperations
     let onOpen: (String) -> Void
     let onClose: () -> Void
-    let onChange: (DirectoryChange) async -> Void
     let onEditSavedSearches: (([SavedLDAPFilter]) -> [SavedLDAPFilter]) -> Void
 
-    @State private var operations: BranchOperations
     @State private var isAddingCondition = false
     @State private var editingCondition: LDAPFilterClause?
     @State private var isChoosingMoveDestination = false
     @State private var isNamingSavedSearch = false
     @State private var savedSearchName = ""
     @FocusState private var isFilterFieldFocused: Bool
-
-    init(session: SearchSession, connection: SavedConnection, tree: DirectoryTree, schema: LdapSchema?,
-         selectedDN: String?, onOpen: @escaping (String) -> Void, onClose: @escaping () -> Void,
-         onChange: @escaping (DirectoryChange) async -> Void,
-         onEditSavedSearches: @escaping (([SavedLDAPFilter]) -> [SavedLDAPFilter]) -> Void) {
-        self.session = session
-        self.connection = connection
-        self.tree = tree
-        self.schema = schema
-        self.selectedDN = selectedDN
-        self.onOpen = onOpen
-        self.onClose = onClose
-        self.onChange = onChange
-        self.onEditSavedSearches = onEditSavedSearches
-        _operations = State(initialValue: BranchOperations(connection: connection, schema: schema))
-    }
 
     private var query: SearchQuery { session.query }
 
@@ -65,7 +49,9 @@ struct SearchResultsView: View {
 
     private var savedSearch: SavedLDAPFilter? {
         guard let filter else { return nil }
-        return connection.savedFilters.first { $0.filter == filter && $0.isPinned }
+        return connection.savedFilters.first {
+            $0.isPinned && SavedSearches.item($0, isSearch: query, filter: filter)
+        }
     }
 
     var body: some View {
@@ -82,17 +68,6 @@ struct SearchResultsView: View {
             if !query.isRaw, let filter {
                 filterLine(filter)
             }
-        }
-        .branchOperations(operations)
-        .onAppear {
-            operations.onChange = onChange
-            operations.onSelect = { _ in }
-        }
-        .onChange(of: connection) {
-            operations.connection = connection
-        }
-        .onChange(of: schema) {
-            operations.schema = schema
         }
         .sheet(isPresented: $isChoosingMoveDestination) {
             let selection = Array(session.selection)

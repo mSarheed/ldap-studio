@@ -116,7 +116,9 @@ nonisolated enum LDAPFilterParser {
                 }
             }
             guard let unescaped = unescape(value) else { return nil }
-            return LDAPFilterClause(attribute: attribute, operation: operation, value: unescaped)
+            let clause = LDAPFilterClause(attribute: attribute, operation: operation, value: unescaped)
+            // `(description=)` and the like: a condition needs a value.
+            return clause.filter == nil ? nil : clause
         case .and, .or:
             return nil
         }

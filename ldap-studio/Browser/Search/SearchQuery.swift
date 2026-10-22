@@ -102,7 +102,7 @@ enum SearchDepth: String, CaseIterable, Identifiable, Codable {
     }
 }
 
-enum LDAPFilterJoin: String, CaseIterable, Identifiable, Codable {
+nonisolated enum LDAPFilterJoin: String, CaseIterable, Identifiable, Codable {
     case and, or
 
     var id: Self { self }
@@ -110,7 +110,7 @@ enum LDAPFilterJoin: String, CaseIterable, Identifiable, Codable {
     var marker: Character { self == .and ? "&" : "|" }
 }
 
-enum LDAPFilterOperator: String, CaseIterable, Identifiable, Codable {
+nonisolated enum LDAPFilterOperator: String, CaseIterable, Identifiable, Codable {
     case equals = "is"
     case contains = "contains"
     case beginsWith = "begins with"
@@ -125,7 +125,7 @@ enum LDAPFilterOperator: String, CaseIterable, Identifiable, Codable {
 }
 
 /// One condition of a search: an attribute, how it's compared, and a value.
-struct LDAPFilterClause: Identifiable, Hashable, Codable {
+nonisolated struct LDAPFilterClause: Identifiable, Hashable, Codable {
     var id = UUID()
     var attribute = ""
     var operation: LDAPFilterOperator = .equals
@@ -337,10 +337,18 @@ enum SavedSearches {
             .sorted { $0.lastUsed > $1.lastUsed }
     }
 
+    /// Whether `item` is the search `query` makes with `filter`: the same
+    /// filter, searched from the same place, as deep.
+    static func item(_ item: SavedLDAPFilter, isSearch query: SearchQuery, filter: String) -> Bool {
+        item.filter == filter
+            && item.query?.baseDN == query.baseDN
+            && (item.query?.depth ?? .subtree) == query.depth
+    }
+
     /// `filters` with `query` marked as just used.
     static func recording(_ query: SearchQuery, filter: String, in filters: [SavedLDAPFilter]) -> [SavedLDAPFilter] {
         var updated = filters
-        if let index = updated.firstIndex(where: { $0.filter == filter }) {
+        if let index = updated.firstIndex(where: { item($0, isSearch: query, filter: filter) }) {
             updated[index].lastUsed = .now
             updated[index].query = query
         } else {
@@ -353,7 +361,7 @@ enum SavedSearches {
     static func pinning(_ query: SearchQuery, filter: String, name: String?,
                         in filters: [SavedLDAPFilter]) -> [SavedLDAPFilter] {
         var updated = filters
-        if let index = updated.firstIndex(where: { $0.filter == filter }) {
+        if let index = updated.firstIndex(where: { item($0, isSearch: query, filter: filter) }) {
             updated[index].name = name
             updated[index].isPinned = true
             updated[index].query = query

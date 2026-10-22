@@ -185,9 +185,10 @@ final class SearchSession {
         }
         let ancestorKey = DN.normalize(ancestor)
         let generation = generation
-        let keys = await store.keys()
-        // A search started meanwhile replaced the hits these keys are for.
-        guard generation == self.generation, keys.count == store.hits.count else { return }
+        let (keys, revision) = await store.keys()
+        // A search started meanwhile, or another change, replaced the hits
+        // these keys are for.
+        guard generation == self.generation, revision == store.revision else { return }
         let affected = Set(keys.indices.filter { DN.keyIsWithin(keys[$0], ancestorKey) })
         guard !affected.isEmpty else { return }
         switch change {
@@ -210,17 +211,25 @@ final class SearchSession {
 /// See `SearchSession.store`.
 private final class HitStore {
     var hits: [SearchSession.Hit] = [] {
-        didSet { cachedKeys = nil }
+        didSet {
+            cachedKeys = nil
+            revision += 1
+        }
     }
+    /// Bumped by every change to `hits`.
+    private(set) var revision = 0
     /// `DN.normalize` of each hit, worked out when first needed.
     private var cachedKeys: [String]?
 
-    func keys() async -> [String] {
-        if let cachedKeys, cachedKeys.count == hits.count { return cachedKeys }
+    /// The keys, and the revision of the hits they belong to. Keys worked
+    /// out for hits that changed meanwhile are returned but not kept.
+    func keys() async -> (keys: [String], revision: Int) {
+        if let cachedKeys { return (cachedKeys, revision) }
+        let startRevision = revision
         let dns = hits.map(\.dn)
         let keys = await Task.detached(priority: .userInitiated) { dns.map(DN.normalize) }.value
-        cachedKeys = keys
-        return keys
+        if revision == startRevision { cachedKeys = keys }
+        return (keys, startRevision)
     }
 
     func remove(at indices: Set<Int>) {
