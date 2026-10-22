@@ -71,6 +71,7 @@ struct MCPSettingsView: View {
                 LabeledContent("Server URL") {
                     HStack {
                         Text(controller.url).font(.callout.monospaced()).textSelection(.enabled)
+                            .fixedSize()
                         copyButton("Copy", key: "url", controller.url)
                     }
                 }
