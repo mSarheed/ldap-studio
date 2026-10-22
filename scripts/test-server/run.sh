@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # A local OpenLDAP server for testing ldap-studio against a large
-# directory, built from Homebrew's openldap (see ../../Brewfile) — no
-# Docker needed.
+# directory: the slapd built along with the libraries the app bundles
+# (core/build/deps, see core/deps/build.sh) — no Docker or Homebrew needed.
 #
 #   scripts/test-server/run.sh start   generate data (first run), start slapd
 #   scripts/test-server/run.sh stop
@@ -30,9 +30,9 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 DIR="${LDS_TEST_DIR:-/tmp/ldap-studio-test-server}"
-OPENLDAP="$(brew --prefix openldap)"
+OPENLDAP="$(cd ../.. && pwd)/core/build/deps"
 SLAPD="$OPENLDAP/libexec/slapd"
-SCHEMA="$(brew --prefix)/etc/openldap/schema"
+SCHEMA="$OPENLDAP/etc/openldap/schema"
 PIDFILE="$DIR/slapd.pid"
 
 stop() {
@@ -142,6 +142,9 @@ seed() {
 }
 
 start() {
+    # The libraries, slapd among them: built the first time (a few
+    # minutes), checked after that.
+    make -C ../../core deps
     seed
     stop
     "$SLAPD" -f "$DIR/slapd.conf" -h "ldap://127.0.0.1:3389/ ldaps://127.0.0.1:3636/"

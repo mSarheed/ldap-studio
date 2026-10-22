@@ -153,11 +153,12 @@ typedef enum {
  * LS_CONNECT_TIMED_OUT, however far along — or stuck — it was.
  */
 
-/* Point the LDAPS/TLS layer at a PEM CA-bundle file. The bundled OpenSSL
- * can't read Homebrew's default cert store from inside the App Sandbox,
- * so the app calls this once at startup with a path to a bundle shipped
- * in its own Resources. Pass NULL to fall back to OpenSSL's default. The
- * path is copied. Call before opening any ldaps:// connection. */
+/* Point the LDAPS/TLS layer at a PEM CA-bundle file. The bundled OpenSSL's
+ * compiled-in default store is a path from the tree it was built in
+ * (core/deps/build.sh), which doesn't exist on users' Macs, so the app
+ * calls this once at startup with a path to a bundle shipped in its own
+ * Resources. Pass NULL to fall back to that default. The path is copied.
+ * Call before opening any ldaps:// connection. */
 void ls_set_tls_cacert(const char *path);
 
 /* Per-connection TLS policy, applied by the next connect the same sticky

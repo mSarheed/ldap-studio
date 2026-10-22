@@ -6,8 +6,9 @@ set -euo pipefail
 # refresh, quick and advanced search, cancellation, connection reuse,
 # LDAPS/StartTLS pinning and trusted certificate authorities,
 # copy/move/export/delete of a branch, a network that stops answering, a
-# server restart, the SSH tunnel (through a throwaway sshd on port 2222)
-# and the MCP server (on port 47999).
+# server restart, password hashing and photo resizing, the SSH tunnel
+# (through a throwaway sshd on port 2222) and the MCP server (on port
+# 47999).
 # Restarts the test server once.
 #
 #   scripts/test-server/run.sh start
@@ -21,7 +22,8 @@ fi
 make -C core >/dev/null
 OUT="$(mktemp -d)"
 
-B="$(brew --prefix)/opt"
+# The libraries the app bundles (core/build/deps), the ones checked here.
+DEPS="$PWD/core/build/deps"
 # The app's non-UI sources, compiled with its Swift settings.
 build() {
     local out="$1"
@@ -39,7 +41,7 @@ build() {
         ldap-studio/Browser/Search/SearchQuery.swift ldap-studio/Browser/Search/LDAPFilterParser.swift \
         scripts/test-server/checks/KeychainStub.swift "$@" \
         core/build/libldapstudio.a \
-        -L"$B/openldap/lib" -L"$B/openssl@4/lib" -L"$B/libxcrypt/lib" -L"$B/libssh2/lib" \
+        -L"$DEPS/lib" -Xlinker -rpath -Xlinker "$DEPS/lib" \
         -lldap -llber -lssl -lcrypto -lcrypt -lssh2 -framework ImageIO -framework CoreGraphics \
         -o "$out"
 }
@@ -78,6 +80,14 @@ TEST_DIR="$DIR" OTHER_CA="$OUT/other-ca.crt" PROXY_PORT=4389 PROXY_PID="$PROXY_P
 
 "$OUT/mcp-checks"
 
+# Password hashing (the bundled libxcrypt) and photo resizing (ImageIO),
+# which nothing above calls.
+clang -std=c11 -Icore/include -I"$DEPS/include" scripts/test-server/checks/helpers_check.c core/build/libldapstudio.a \
+    -L"$DEPS/lib" -Wl,-rpath,"$DEPS/lib" \
+    -lldap -llber -lssl -lcrypto -lcrypt -lssh2 -framework ImageIO -framework CoreGraphics -framework CoreFoundation \
+    -o "$OUT/helpers_check"
+"$OUT/helpers_check"
+
 # The SSH tunnel, through a throwaway sshd on port 2222 that only
 # accepts a key generated here.
 if [[ -x /usr/sbin/sshd ]]; then
@@ -100,8 +110,8 @@ CONF
     /usr/sbin/sshd -D -f "$OUT/sshd_config" -E "$OUT/sshd.log" &
     SSHD_PID=$!
     for _ in $(seq 50); do nc -z 127.0.0.1 2222 2>/dev/null && break; sleep 0.1; done
-    clang -std=c11 -Icore/include -I"$B/openldap/include" scripts/test-server/checks/ssh_check.c core/build/libldapstudio.a \
-        -L"$B/openldap/lib" -L"$B/openssl@4/lib" -L"$B/libxcrypt/lib" -L"$B/libssh2/lib" \
+    clang -std=c11 -Icore/include -I"$DEPS/include" scripts/test-server/checks/ssh_check.c core/build/libldapstudio.a \
+        -L"$DEPS/lib" -Wl,-rpath,"$DEPS/lib" \
         -lldap -llber -lssl -lcrypto -lcrypt -lssh2 -framework ImageIO -framework CoreGraphics \
         -o "$OUT/ssh_check"
     TEST_DIR="$DIR" "$OUT/ssh_check" "$OUT/clientkey"
