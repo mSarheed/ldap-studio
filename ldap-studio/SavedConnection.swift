@@ -59,6 +59,10 @@ struct SavedConnection: Identifiable, Codable, Hashable {
     /// Every write path is blocked for this connection — a guard against
     /// fat-fingering a change on a production directory.
     var isReadOnly: Bool
+    /// AI agents connected to the app's MCP server may read this directory.
+    /// Off unless the user turns it on for this connection; never carried
+    /// in an exported connection, so importing one can't expose a directory.
+    var allowsMCP: Bool
     var chaseReferrals: Bool
     var timeoutSeconds: Int
     var authentication: LDAPAuthentication
@@ -78,7 +82,7 @@ struct SavedConnection: Identifiable, Codable, Hashable {
          useStartTLS: Bool = false, baseDN: String, bindDN: String,
          trustedCertSHA256: String? = nil, bookmarks: [String] = [],
          savedFilters: [SavedLDAPFilter] = [],
-         isFavorite: Bool = false, isReadOnly: Bool = false,
+         isFavorite: Bool = false, isReadOnly: Bool = false, allowsMCP: Bool = false,
          chaseReferrals: Bool = false, timeoutSeconds: Int = 15,
          authentication: LDAPAuthentication = .simple,
          saslAuthID: String = "", saslRealm: String = "",
@@ -99,6 +103,7 @@ struct SavedConnection: Identifiable, Codable, Hashable {
         self.savedFilters = savedFilters
         self.isFavorite = isFavorite
         self.isReadOnly = isReadOnly
+        self.allowsMCP = allowsMCP
         self.chaseReferrals = chaseReferrals
         self.timeoutSeconds = timeoutSeconds
         self.authentication = authentication
@@ -116,7 +121,7 @@ struct SavedConnection: Identifiable, Codable, Hashable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, name, host, port, useSSL, useStartTLS, baseDN, bindDN, trustedCertSHA256, bookmarks, savedFilters, isFavorite, isReadOnly
+        case id, name, host, port, useSSL, useStartTLS, baseDN, bindDN, trustedCertSHA256, bookmarks, savedFilters, isFavorite, isReadOnly, allowsMCP
         case chaseReferrals, timeoutSeconds, authentication, saslAuthID, saslRealm
         case clientCertificateBookmark, clientKeyBookmark
         case useSSHTunnel, sshHost, sshPort, sshUsername, sshAuthentication, sshPrivateKeyBookmark, sshHostKeySHA256
@@ -141,6 +146,7 @@ struct SavedConnection: Identifiable, Codable, Hashable {
         savedFilters = try container.decodeIfPresent([SavedLDAPFilter].self, forKey: .savedFilters) ?? []
         isFavorite = try container.decodeIfPresent(Bool.self, forKey: .isFavorite) ?? false
         isReadOnly = try container.decodeIfPresent(Bool.self, forKey: .isReadOnly) ?? false
+        allowsMCP = try container.decodeIfPresent(Bool.self, forKey: .allowsMCP) ?? false
         chaseReferrals = try container.decodeIfPresent(Bool.self, forKey: .chaseReferrals) ?? false
         timeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .timeoutSeconds) ?? 15
         authentication = try container.decodeIfPresent(LDAPAuthentication.self, forKey: .authentication) ?? .simple
@@ -172,6 +178,7 @@ struct SavedConnection: Identifiable, Codable, Hashable {
         if !savedFilters.isEmpty { try container.encode(savedFilters, forKey: .savedFilters) }
         if isFavorite { try container.encode(true, forKey: .isFavorite) }
         if isReadOnly { try container.encode(true, forKey: .isReadOnly) }
+        if allowsMCP { try container.encode(true, forKey: .allowsMCP) }
         if chaseReferrals { try container.encode(true, forKey: .chaseReferrals) }
         if timeoutSeconds != 15 { try container.encode(timeoutSeconds, forKey: .timeoutSeconds) }
         if authentication != .simple { try container.encode(authentication, forKey: .authentication) }

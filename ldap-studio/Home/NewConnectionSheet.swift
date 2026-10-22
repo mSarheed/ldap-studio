@@ -94,6 +94,7 @@ struct NewConnectionSheet: View {
     @State private var encryption: Encryption
     @State private var baseDN: String
     @State private var isReadOnly: Bool
+    @State private var allowsMCP: Bool
 
     // Authentication
     @State private var authentication: LDAPAuthentication
@@ -146,6 +147,7 @@ struct NewConnectionSheet: View {
         _encryption = State(initialValue: encryption)
         _baseDN = State(initialValue: existingConnection?.baseDN ?? "")
         _isReadOnly = State(initialValue: existingConnection?.isReadOnly ?? false)
+        _allowsMCP = State(initialValue: existingConnection?.allowsMCP ?? false)
 
         _authentication = State(initialValue: existingConnection?.authentication ?? .simple)
         _bindDN = State(initialValue: existingConnection?.bindDN ?? "")
@@ -208,6 +210,7 @@ struct NewConnectionSheet: View {
             savedFilters: existingConnection?.savedFilters ?? [],
             isFavorite: existingConnection?.isFavorite ?? false,
             isReadOnly: isReadOnly,
+            allowsMCP: allowsMCP,
             chaseReferrals: chaseReferrals,
             timeoutSeconds: timeoutSeconds,
             authentication: authentication,
@@ -353,6 +356,8 @@ struct NewConnectionSheet: View {
             }
             TextField("Base DN", text: $baseDN, prompt: Text("dc=example,dc=com"))
             Toggle("Read-only — block every write operation", isOn: $isReadOnly)
+            Toggle("Let AI agents read this directory (MCP)", isOn: $allowsMCP)
+            hint("Agents connected to LDAP Studio's MCP server can search and read it, never change it. Turn the server on in Settings → MCP Server.")
         }
     }
 
@@ -506,7 +511,13 @@ struct NewConnectionSheet: View {
     // MARK: Actions
 
     private func save() {
-        let connection = builtConnection
+        var connection = builtConnection
+        // Sharing with agents can also be switched in Settings while this
+        // sheet is open. Unless it was changed here, keep what's stored, so
+        // saving an unrelated edit never undoes turning sharing off.
+        if let existingConnection, allowsMCP == existingConnection.allowsMCP {
+            connection.allowsMCP = store.latest(existingConnection).allowsMCP
+        }
         KeychainService.savePassword(password, for: connection.id)
         KeychainService.saveSSHPassword(sshPassword, for: connection.id)
         if existingConnection == nil {

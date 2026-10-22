@@ -60,3 +60,11 @@ final class OperationLog {
 
     func clear() { entries.removeAll() }
 }
+
+/// Who asked for the operations the current task runs, when it wasn't the
+/// app's own windows — "MCP" for an AI agent connected to the MCP server.
+/// `logged(_:)` puts it in front of the Operation Log row, so an agent's
+/// reads are told apart from the user's.
+nonisolated enum OperationOrigin {
+    @TaskLocal static var current: String?
+}

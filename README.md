@@ -45,10 +45,34 @@ Betas of the next version are published as pre-releases (`vx.x.x-beta.n`). Turn 
 - Schema browser: object classes and attributes, with full superior-class inheritance resolved
 - Autocomplete for attribute names and object classes when adding attributes or creating entries, driven by the server's own schema
 - Native macOS menu bar integration for every major action
+- A read-only MCP server, off by default, so AI agents (Claude Code, Codex, Cursor, VS Code…) can search and read the directories you choose
+
+## Connecting AI Agents (MCP)
+
+LDAP Studio can let AI agents read your directories through the [Model Context Protocol](https://modelcontextprotocol.io). It's off until you turn it on:
+
+1. Open **LDAP Studio → Settings… (⌘,) → MCP Server** and turn on **Let AI agents read your directories**.
+2. Under **Shared Directories**, turn on each connection agents may read. You can also do this in a connection's editor.
+3. Under **Connect an Agent**, pick your agent and click **Copy Setup**. For Claude Code that's a command to paste into Terminal; for Codex, Cursor, VS Code and Gemini CLI it's the config to add. Claude Desktop and other apps that can only start local commands go through [`mcp-remote`](https://www.npmjs.com/package/mcp-remote). Any other agent that supports MCP over HTTP works with the server URL (`http://127.0.0.1:47389/mcp`) and the header `Authorization: Bearer <token>`.
+
+LDAP Studio has to be running for agents to connect. Agents get six tools: `list_connections`, `get_server_info`, `search`, `get_entry`, `list_children` and `get_schema`.
+
+**It's read-only.** Every tool is a search or a read, so an agent can't add, change, rename or delete anything, even through a connection whose account could. The MCP code reaches directories only through a wrapper that offers reads, so there's no path from it to the app's write functions.
+
+**What agents never see:**
+
+- Connections you haven't shared.
+- Connection passwords. They stay in your Keychain.
+- Attributes that hold secrets, such as `userPassword`, `unicodePwd`, LAPS passwords, BitLocker recovery keys, Kerberos keys, Samba hashes and replication credentials in server configuration, plus any attributes you add under **Also hide**. These are left out of results, can't be requested, and can't appear in a search filter, so an agent can't guess a value one filter at a time. This also covers their aliases, OIDs and subtypes, and filters on their supertypes. Attribute names are checked against the server's schema. If LDAP Studio can't read the schema, filters can only test `objectClass`, and entries show only their `objectClass` values.
+- Binary values. They're described by size only.
+
+Results are capped in size, so a broad search can't flood an agent's context. Agents' reads show up in the Operation Log marked `[MCP]`.
+
+**Who can connect:** the server listens on 127.0.0.1 only, so it can't be reached from another machine. Every request must carry a 256-bit access token, which is stored in your Keychain and can be regenerated in Settings. It also checks the `Host` and `Origin` headers, which blocks web pages from reaching it through DNS rebinding. Agents can read whatever each shared connection's bind account can read, so for the strongest guarantee, share a connection that binds as an account the directory only lets read.
 
 ## Testing Against a Large Directory
 
-`scripts/test-server/run.sh start` runs a local OpenLDAP server (from the Homebrew `openldap` in the Brewfile) with about 150,000 entries, one OU with 76,000 direct children, a 30-level-deep branch, and an Active Directory-like 500-entry size limit. `scripts/test-server/check.sh` then exercises browsing, searching and branch operations against it. See the comments in `run.sh` for the accounts to bind as.
+`scripts/test-server/run.sh start` runs a local OpenLDAP server (from the Homebrew `openldap` in the Brewfile) with about 150,000 entries, one OU with 76,000 direct children, a 30-level-deep branch, and an Active Directory-like 500-entry size limit. `scripts/test-server/check.sh` then exercises browsing, searching, branch operations and the MCP server against it. See the comments in `run.sh` for the accounts to bind as.
 
 ## Requirements
 

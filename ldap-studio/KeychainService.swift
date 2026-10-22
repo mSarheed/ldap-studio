@@ -9,6 +9,10 @@ import Security
 enum KeychainService {
     private static let service = "app.ldap-studio.connection-password"
     private static let sshService = "app.ldap-studio.ssh-password"
+    private static let mcpService = "app.ldap-studio.mcp-token"
+    /// There's one MCP access token, not one per connection; the helpers
+    /// below key everything by a UUID, so it gets a fixed one.
+    private static let mcpTokenAccount = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
 
     /// What's been read or written this session, by service and account —
     /// absent ones too, but not lookups that failed some other way (a locked
@@ -72,14 +76,32 @@ enum KeychainService {
         readSecret(service: sshService, id: id)
     }
 
-    private static func saveSecret(_ value: String, service: String, id: UUID) {
+    /// False if the Keychain didn't take it — the old token, if any, is
+    /// still what's stored.
+    static func saveMCPToken(_ token: String) -> Bool {
+        saveSecret(token, service: mcpService, id: mcpTokenAccount)
+    }
+
+    static func readMCPToken() -> String? {
+        readSecret(service: mcpService, id: mcpTokenAccount)
+    }
+
+    /// Replaces the stored value in place, so a failed write leaves the
+    /// old one rather than none. True if the Keychain took it.
+    @discardableResult
+    private static func saveSecret(_ value: String, service: String, id: UUID) -> Bool {
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
                                     kSecAttrService as String: service,
                                     kSecAttrAccount as String: id.uuidString]
-        SecItemDelete(query as CFDictionary)
-        var item = query
-        item[kSecValueData as String] = Data(value.utf8)
-        rememberWrite(value, status: SecItemAdd(item as CFDictionary, nil), service, id)
+        let data = Data(value.utf8)
+        var status = SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+        if status == errSecItemNotFound {
+            var item = query
+            item[kSecValueData as String] = data
+            status = SecItemAdd(item as CFDictionary, nil)
+        }
+        rememberWrite(value, status: status, service, id)
+        return status == errSecSuccess
     }
 
     private static func readSecret(service: String, id: UUID) -> String? {
