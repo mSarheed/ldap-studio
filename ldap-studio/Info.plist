@@ -4,5 +4,13 @@
 <dict>
 	<key>CFBundleIconFile</key>
 	<string>ldap-studio</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUEnableInstallerLauncherService</key>
+	<true/>
+	<key>SUFeedURL</key>
+	<string>https://raw.githubusercontent.com/mSarheed/ldap-studio/main/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>OUdc5j9Ko46+dAnxcMKQS9k2FbeGUtQCwRPEIvriPl4=</string>
 </dict>
 </plist>

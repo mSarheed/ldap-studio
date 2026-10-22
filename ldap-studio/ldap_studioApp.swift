@@ -8,12 +8,12 @@
 import AppKit
 import SwiftUI
 
-/// Fires the one-per-day update check once the app is actually up, and
-/// starts the MCP server if the user left it on.
+/// Starts the updater once the app is actually up, and the MCP server if
+/// the user left it on.
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         MCPServerController.shared.startIfEnabled()
-        Task { await UpdateChecker.shared.checkOnLaunch() }
+        UpdateChecker.shared.start()
     }
 
     /// Stops the MCP server, lets in-flight timed-out connection attempts

@@ -27,7 +27,7 @@ struct AppMenuCommands: Commands {
             }
             Divider()
             Button("Check for Updates…") {
-                Task { await UpdateChecker.shared.check(userInitiated: true) }
+                UpdateChecker.shared.checkForUpdates()
             }
             Toggle("Check for Beta Versions", isOn: $includesBetas)
         }

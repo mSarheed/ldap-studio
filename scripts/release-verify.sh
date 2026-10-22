@@ -44,7 +44,7 @@ for BIN in "${MACHO[@]}"; do
             @rpath/*) [[ -f "$APP/Contents/Frameworks/${DEP#@rpath/}" ]] || fail "$REL: links $DEP, which is not bundled" ;;
             *) fail "$REL: links $DEP, outside the app" ;;
         esac
-    done < <(otool -L "$BIN" | tail -n +2 | awk '{print $1}')
+    done < <(otool -arch arm64 -L "$BIN" | tail -n +2 | awk '{print $1}')
 done
 
 ENTITLEMENTS="$(codesign -d --entitlements - --xml "$APP" 2>/dev/null)"

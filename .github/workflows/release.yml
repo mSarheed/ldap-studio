@@ -81,6 +81,9 @@ jobs:
     environment: release
     permissions:
       contents: read
+    outputs:
+      enclosure: ${{ steps.sparkle.outputs.enclosure }}
+      minimum_system: ${{ steps.sparkle.outputs.minimum_system }}
     env:
       HOMEBREW_NO_INSTALL_CLEANUP: "1"
     steps:
@@ -100,6 +103,23 @@ jobs:
           NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
           NOTARY_PRIVATE_KEY: ${{ secrets.NOTARY_PRIVATE_KEY }}
         run: scripts/release-build.sh
+      # The app's updater only installs a zip signed with this key; the
+      # signature goes into the appcast item when the release is published.
+      - name: Sign the update for Sparkle
+        id: sparkle
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          ZIP: dist/ldap-studio-${{ needs.prepare.outputs.tag }}.zip
+        run: |
+          # sign_update ships with the Sparkle package the app is built with.
+          xcodebuild -resolvePackageDependencies -project ldap-studio.xcodeproj -scheme ldap-studio \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/packages" > /dev/null
+          ENCLOSURE="$(printf '%s' "$SPARKLE_PRIVATE_KEY" |
+            "$RUNNER_TEMP/packages/artifacts/sparkle/Sparkle/bin/sign_update" --ed-key-file - "$ZIP")"
+          MINIMUM_SYSTEM="$(unzip -p "$ZIP" ldap-studio.app/Contents/Info.plist |
+            plutil -extract LSMinimumSystemVersion raw -o - -)"
+          echo "enclosure=$ENCLOSURE" >> "$GITHUB_OUTPUT"
+          echo "minimum_system=$MINIMUM_SYSTEM" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ldap-studio-${{ needs.prepare.outputs.tag }}
@@ -169,3 +189,23 @@ jobs:
           if [ -n "$NOTES_START" ]; then ARGS+=(--notes-start-tag "$NOTES_START"); fi
           if [ "$PRERELEASE" = true ]; then ARGS+=(--prerelease --latest=false); else ARGS+=(--latest); fi
           gh release create "$TAG" dist/* "${ARGS[@]}"
+      # Installed apps read appcast.xml from main (SUFeedURL), so this is what
+      # offers them the update. The contents API refuses the write if main's
+      # appcast changed since it was read.
+      - name: Add the release to the appcast
+        env:
+          BUILD: ${{ github.run_number }}
+          ENCLOSURE: ${{ needs.build.outputs.enclosure }}
+          MINIMUM_SYSTEM: ${{ needs.build.outputs.minimum_system }}
+        run: |
+          gh release view "$TAG" --json body --jq .body > "$RUNNER_TEMP/notes.md"
+          gh api markdown -f mode=gfm -f context="$GH_REPO" -F text=@"$RUNNER_TEMP/notes.md" > "$RUNNER_TEMP/notes.html"
+          gh api "repos/$GH_REPO/contents/appcast.xml?ref=main" > "$RUNNER_TEMP/current.json"
+          jq -r .content "$RUNNER_TEMP/current.json" | base64 --decode > "$RUNNER_TEMP/appcast.xml"
+          scripts/release-appcast.py "$RUNNER_TEMP/appcast.xml" --repo "$GH_REPO" --tag "$TAG" \
+            --build "$BUILD" --enclosure "$ENCLOSURE" --minimum-system "$MINIMUM_SYSTEM" \
+            --notes "$RUNNER_TEMP/notes.html"
+          base64 --wrap=0 "$RUNNER_TEMP/appcast.xml" > "$RUNNER_TEMP/appcast.b64"
+          gh api --silent -X PUT "repos/$GH_REPO/contents/appcast.xml" \
+            -f message="🔖 Add $TAG to the appcast" -f branch=main \
+            -f sha="$(jq -r .sha "$RUNNER_TEMP/current.json")" -F content=@"$RUNNER_TEMP/appcast.b64"
