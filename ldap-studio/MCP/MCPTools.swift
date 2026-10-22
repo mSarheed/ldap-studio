@@ -225,7 +225,11 @@ final class MCPTools {
         }
         return [
             "connection": .string(directory.connection.name),
-            "root_dse": render(dse, policy: policy),
+            // The root DSE is the server describing itself, and on Active
+            // Directory most of its attributes aren't in the schema; it
+            // holds no directory data, so names the schema doesn't know are
+            // shown here (hidden ones still aren't).
+            "root_dse": render(dse, policy: policy, unresolved: .show),
         ]
     }
 
@@ -295,9 +299,9 @@ final class MCPTools {
         let attributes = visible.isEmpty ? ["1.1"] : visible
         func row(_ entry: LdapEntry) -> TreeRow {
             TreeRow(LdapEntry(dn: entry.dn, name: entry.name,
-                              attributes: entry.attributes.filter { !policy.isHidden($0.name) }))
+                              attributes: entry.attributes.filter { policy.isShown($0.name) }))
         }
-        let showsObjectClasses = !policy.isHidden("objectClass")
+        let showsObjectClasses = policy.isShown("objectClass")
 
         var rows: [TreeRow] = []
         var isComplete = true
@@ -474,13 +478,17 @@ final class MCPTools {
     /// Values that would take the entry past `maxResultBytes` are left
     /// out (and counted), so one entry with huge multi-valued attributes
     /// can't swamp the agent either.
-    private func render(_ entry: LdapEntry, policy: MCPAttributePolicy) -> JSONValue {
+    private enum Unresolved { case show, withhold }
+
+    private func render(_ entry: LdapEntry, policy: MCPAttributePolicy,
+                        unresolved: Unresolved = .withhold) -> JSONValue {
         var values: [String: [String]] = [:]
         var totals: [String: Int] = [:]
         var hidden: [String] = []
         var bytes = entry.dn.utf8.count + 128
         for attribute in entry.attributes {
-            if policy.isHidden(attribute.name) {
+            let shown = unresolved == .show ? !policy.isHidden(attribute.name) : policy.isShown(attribute.name)
+            if !shown {
                 if !hidden.contains(attribute.name) { hidden.append(attribute.name) }
                 continue
             }
@@ -505,6 +513,9 @@ final class MCPTools {
         }
         if !hidden.isEmpty {
             json["hidden_attributes"] = JSONValue(hidden)
+        }
+        if !policy.knowsSchema, hidden.contains(where: { !policy.isHidden($0) }) {
+            json["note"] = "LDAP Studio couldn't read this server's schema, so it can't tell which attributes are other names for hidden ones; only objectClass is shown."
         }
         return .object(json)
     }

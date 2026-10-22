@@ -59,7 +59,9 @@ nonisolated struct MCPAttributePolicy: Sendable {
     let knowsSchema: Bool
 
     init(extraHidden: [String] = [], schema: LdapSchema?) {
-        var hidden = Set((Self.alwaysHidden + extraHidden).map { $0.lowercased() })
+        // "mail;lang-en" hides all of mail: options don't make a separate
+        // attribute, and matching ignores them.
+        var hidden = Set((Self.alwaysHidden + extraHidden).map(Self.baseName))
         hidden.insert("2.5.4.35") // userPassword, whatever else is known
         var supertypes = Set<String>()
         var known = Set<String>()
@@ -113,6 +115,15 @@ nonisolated struct MCPAttributePolicy: Sendable {
 
     func isHidden(_ description: String) -> Bool {
         hidden.contains(Self.baseName(description))
+    }
+
+    /// Whether a returned attribute may be shown. Only ones the schema
+    /// resolves (objectClass aside): an attribute it doesn't know could be
+    /// an alias or subtype of a hidden one, so without a schema nothing but
+    /// objectClass is shown.
+    func isShown(_ description: String) -> Bool {
+        let name = Self.baseName(description)
+        return !hidden.contains(name) && (name == "objectclass" || known.contains(name))
     }
 
     /// What an attribute name an agent passed may look like: a name or a

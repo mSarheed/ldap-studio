@@ -100,6 +100,10 @@ struct MCPSettingsView: View {
                     }
                 }
                 Button("Generate New Token…") { isConfirmingNewToken = true }
+                if let error = controller.tokenError {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.red)
+                }
             } header: {
                 Text("Access Token")
             } footer: {

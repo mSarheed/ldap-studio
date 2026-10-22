@@ -76,7 +76,9 @@ enum KeychainService {
         readSecret(service: sshService, id: id)
     }
 
-    static func saveMCPToken(_ token: String) {
+    /// False if the Keychain didn't take it — the old token, if any, is
+    /// still what's stored.
+    static func saveMCPToken(_ token: String) -> Bool {
         saveSecret(token, service: mcpService, id: mcpTokenAccount)
     }
 
@@ -84,14 +86,22 @@ enum KeychainService {
         readSecret(service: mcpService, id: mcpTokenAccount)
     }
 
-    private static func saveSecret(_ value: String, service: String, id: UUID) {
+    /// Replaces the stored value in place, so a failed write leaves the
+    /// old one rather than none. True if the Keychain took it.
+    @discardableResult
+    private static func saveSecret(_ value: String, service: String, id: UUID) -> Bool {
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
                                     kSecAttrService as String: service,
                                     kSecAttrAccount as String: id.uuidString]
-        SecItemDelete(query as CFDictionary)
-        var item = query
-        item[kSecValueData as String] = Data(value.utf8)
-        rememberWrite(value, status: SecItemAdd(item as CFDictionary, nil), service, id)
+        let data = Data(value.utf8)
+        var status = SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+        if status == errSecItemNotFound {
+            var item = query
+            item[kSecValueData as String] = data
+            status = SecItemAdd(item as CFDictionary, nil)
+        }
+        rememberWrite(value, status: status, service, id)
+        return status == errSecSuccess
     }
 
     private static func readSecret(service: String, id: UUID) -> String? {

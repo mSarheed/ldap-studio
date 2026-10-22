@@ -55,6 +55,10 @@ final class MCPServerController {
     /// showing it — so nobody who never uses MCP gets a Keychain item.
     private(set) var token = ""
 
+    /// Set when the Keychain wouldn't store the token, so the user knows a
+    /// new one didn't take (or won't survive a relaunch).
+    private(set) var tokenError: String?
+
     var url: String { "http://127.0.0.1:\(port)\(MCPHTTPServer.path)" }
 
     private var server: MCPHTTPServer?
@@ -77,7 +81,8 @@ final class MCPServerController {
             token = saved
         } else {
             token = Self.newToken()
-            KeychainService.saveMCPToken(token)
+            tokenError = KeychainService.saveMCPToken(token) ? nil
+                : "The access token couldn't be saved in the Keychain, so it will change when LDAP Studio restarts."
         }
     }
 
@@ -105,11 +110,17 @@ final class MCPServerController {
     }
 
     /// Replaces the access token. Agents still using the old one are
-    /// refused from the next request on.
+    /// refused from the next request on. Only once the Keychain holds the
+    /// new one: otherwise the old one would come back at the next launch.
     func regenerateToken() {
-        token = Self.newToken()
-        KeychainService.saveMCPToken(token)
-        server?.setToken(token)
+        let replacement = Self.newToken()
+        guard KeychainService.saveMCPToken(replacement) else {
+            tokenError = "A new token couldn't be saved in the Keychain, so the current one is still in use."
+            return
+        }
+        tokenError = nil
+        token = replacement
+        server?.setToken(replacement)
     }
 
     private var hiddenAttributeList: [String] {

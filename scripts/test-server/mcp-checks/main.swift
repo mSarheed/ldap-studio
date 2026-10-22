@@ -293,6 +293,10 @@ func count(_ value: JSONValue?, _ key: String) -> Int {
     let blind = MCPAttributePolicy(schema: nil)
     check((try? blind.check(filter: "(&(objectClass=person)(!(objectClass=computer)))")) != nil, "no schema: objectClass filters still work")
     check((try? blind.check(filter: "(cn=Alice)")) == nil && (try? blind.check("cn")) == nil, "no schema: other names are refused")
+    check(!blind.isShown("cn") && !blind.isShown("surname") && blind.isShown("objectClass"),
+          "no schema: only objectClass values are shown, since aliases can't be told apart")
+    check(MCPAttributePolicy(extraHidden: ["mail;lang-en"], schema: nil).isHidden("mail"),
+          "hiding an attribute with options hides the whole attribute")
     let emptySchema = MCPAttributePolicy(schema: LdapSchema(objectClasses: [], attributeTypes: []))
     check(!emptySchema.knowsSchema && (try? emptySchema.check("2.5.4.3")) == nil, "an empty schema counts as none")
 
