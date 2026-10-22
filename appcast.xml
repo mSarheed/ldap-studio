@@ -4,6 +4,19 @@
         <title>LDAP Studio</title>
         <language>en</language>
         <item>
+            <title>LDAP Studio 1.4.2-beta.5</title>
+            <pubDate>Thu, 22 Oct 2026 09:54:24 GMT</pubDate>
+            <sparkle:version>8</sparkle:version>
+            <sparkle:shortVersionString>1.4.2-beta.5</sparkle:shortVersionString>
+            <sparkle:channel>beta</sparkle:channel>
+            <sparkle:minimumSystemVersion>27.0</sparkle:minimumSystemVersion>
+            <sparkle:fullReleaseNotesLink>https://github.com/mSarheed/ldap-studio/releases/tag/v1.4.2-beta.5</sparkle:fullReleaseNotesLink>
+            <description><![CDATA[<p dir="auto">A beta of the next LDAP Studio. Betas reach you as updates while <strong>LDAP Studio → Check for Beta Versions</strong> is on.</p>
+
+<p dir="auto"><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/mSarheed/ldap-studio/compare/v1.4.2-beta.4...v1.4.2-beta.5"><tt>v1.4.2-beta.4...v1.4.2-beta.5</tt></a></p>]]></description>
+            <enclosure url="https://github.com/mSarheed/ldap-studio/releases/download/v1.4.2-beta.5/ldap-studio-v1.4.2-beta.5.zip" length="7065290" type="application/octet-stream" sparkle:edSignature="ixYwOW6q43MFeDklk9/ND+9nIqNK6TZwUWL+euPrVmWQWcjartbCok/BRRKi0okiTzQuey6/3qe9Kwbfk5+yAg=="/>
+        </item>
+        <item>
             <title>LDAP Studio 1.4.2-beta.4</title>
             <pubDate>Thu, 22 Oct 2026 09:21:03 GMT</pubDate>
             <sparkle:version>7</sparkle:version>
