@@ -130,7 +130,7 @@ static void tls_through_tunnel(void) {
   ls_error_dispose(&e);
 
   policy();
-  ls_set_tls_trust(issuing, true);
+  ls_set_tls_trust(issuing, LS_HOST_NAMES_EXACT);
   rc = ls_test_connection("localhost", 3636, true,
                           "cn=reader,ou=Service,dc=example,dc=com", "reader",
                           &e);
@@ -138,14 +138,14 @@ static void tls_through_tunnel(void) {
   ls_error_dispose(&e);
 
   policy();
-  ls_set_tls_trust(issuing, true);
+  ls_set_tls_trust(issuing, LS_HOST_NAMES_EXACT);
   rc = ls_test_connection("127.0.0.1", 3636, true,
                           "cn=reader,ou=Service,dc=example,dc=com", "reader",
                           &e);
   check(rc == LS_TLS_UNTRUSTED,
         "SSH: the certificate is checked against the real host name");
   ls_error_dispose(&e);
-  ls_set_tls_trust(NULL, true);
+  ls_set_tls_trust(NULL, LS_HOST_NAMES_EXACT);
   free(issuing);
 }
 

@@ -27,7 +27,7 @@ struct ExportableConnection: Codable {
     var isReadOnly: Bool
     var trustedCertSHA256: String?
     var trustedCACertificates: [Data]
-    var checksCertificateHostName: Bool
+    var certificateHostNames: CertificateHostNames
     var chaseReferrals: Bool
     var timeoutSeconds: Int
     var authentication: LDAPAuthentication
@@ -51,7 +51,7 @@ struct ExportableConnection: Codable {
 
     enum CodingKeys: String, CodingKey {
         case name, host, port, useSSL, useStartTLS, baseDN, bindDN, bookmarks, savedFilters, isFavorite, isReadOnly
-        case trustedCertSHA256, trustedCACertificates, checksCertificateHostName, chaseReferrals, timeoutSeconds, authentication, saslAuthID, saslRealm
+        case trustedCertSHA256, trustedCACertificates, certificateHostNames, checksCertificateHostName, chaseReferrals, timeoutSeconds, authentication, saslAuthID, saslRealm
         case useSSHTunnel, sshHost, sshPort, sshUsername, sshAuthentication, sshHostKeySHA256
         case password, passwordIsBase64, sshPassword, sshPasswordIsBase64
     }
@@ -60,7 +60,7 @@ struct ExportableConnection: Codable {
          baseDN: String, bindDN: String, bookmarks: [String] = [],
          savedFilters: [SavedLDAPFilter] = [], isFavorite: Bool = false,
          isReadOnly: Bool = false, trustedCertSHA256: String? = nil,
-         trustedCACertificates: [Data] = [], checksCertificateHostName: Bool = true,
+         trustedCACertificates: [Data] = [], certificateHostNames: CertificateHostNames = .exact,
          chaseReferrals: Bool = false, timeoutSeconds: Int = 15,
          authentication: LDAPAuthentication = .simple, saslAuthID: String = "",
          saslRealm: String = "", useSSHTunnel: Bool = false,
@@ -82,7 +82,7 @@ struct ExportableConnection: Codable {
         self.isReadOnly = isReadOnly
         self.trustedCertSHA256 = trustedCertSHA256
         self.trustedCACertificates = trustedCACertificates
-        self.checksCertificateHostName = checksCertificateHostName
+        self.certificateHostNames = certificateHostNames
         self.chaseReferrals = chaseReferrals
         self.timeoutSeconds = timeoutSeconds
         self.authentication = authentication
@@ -117,7 +117,11 @@ struct ExportableConnection: Codable {
         isReadOnly = try container.decodeIfPresent(Bool.self, forKey: .isReadOnly) ?? false
         trustedCertSHA256 = try container.decodeIfPresent(String.self, forKey: .trustedCertSHA256)
         trustedCACertificates = try container.decodeIfPresent([Data].self, forKey: .trustedCACertificates) ?? []
-        checksCertificateHostName = try container.decodeIfPresent(Bool.self, forKey: .checksCertificateHostName) ?? true
+        // A 1.4.2 beta wrote `checksCertificateHostName`; false meant any name.
+        // A rule this version doesn't know (from a later one) is read as the
+        // strictest rather than failing the whole file.
+        certificateHostNames = (try? container.decodeIfPresent(CertificateHostNames.self, forKey: .certificateHostNames))
+            ?? ((try? container.decodeIfPresent(Bool.self, forKey: .checksCertificateHostName)) == false ? .any : .exact)
         chaseReferrals = try container.decodeIfPresent(Bool.self, forKey: .chaseReferrals) ?? false
         timeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .timeoutSeconds) ?? 15
         authentication = try container.decodeIfPresent(LDAPAuthentication.self, forKey: .authentication) ?? .simple
@@ -150,7 +154,7 @@ struct ExportableConnection: Codable {
         try container.encode(isReadOnly, forKey: .isReadOnly)
         try container.encodeIfPresent(trustedCertSHA256, forKey: .trustedCertSHA256)
         if !trustedCACertificates.isEmpty { try container.encode(trustedCACertificates, forKey: .trustedCACertificates) }
-        if !checksCertificateHostName { try container.encode(false, forKey: .checksCertificateHostName) }
+        if certificateHostNames != .exact { try container.encode(certificateHostNames, forKey: .certificateHostNames) }
         try container.encode(chaseReferrals, forKey: .chaseReferrals)
         try container.encode(timeoutSeconds, forKey: .timeoutSeconds)
         try container.encode(authentication, forKey: .authentication)
@@ -202,7 +206,7 @@ extension ExportableConnection {
             isReadOnly: connection.isReadOnly,
             trustedCertSHA256: connection.trustedCertSHA256,
             trustedCACertificates: connection.trustedCACertificates,
-            checksCertificateHostName: connection.checksCertificateHostName,
+            certificateHostNames: connection.certificateHostNames,
             chaseReferrals: connection.chaseReferrals,
             timeoutSeconds: connection.timeoutSeconds,
             authentication: connection.authentication,

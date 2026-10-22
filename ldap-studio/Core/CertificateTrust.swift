@@ -31,13 +31,12 @@ nonisolated struct PresentedCertificate: Identifiable, Hashable, Sendable {
 /// What the user chose to trust for a connection.
 nonisolated enum CertificateTrustDecision: Equatable, Sendable {
     /// Every server this certificate authority (DER) issued a certificate
-    /// to — and with `acceptingOtherHostNames`, whatever name it was issued
-    /// to.
-    case certificateAuthority(Data, acceptingOtherHostNames: Bool)
+    /// to, as long as it was issued to a name `hostNames` accepts.
+    case certificateAuthority(Data, hostNames: CertificateHostNames)
     /// The one server certificate with this SHA-256 (lowercase hex).
     case certificate(sha256: String)
-    /// Certificates issued to a name other than the connection's host.
-    case otherHostNames
+    /// Certificates issued to the names `hostNames` accepts.
+    case hostNames(CertificateHostNames)
 }
 
 /// Why a probed certificate isn't accepted, as far as the probe can tell.
@@ -64,10 +63,22 @@ extension LdapCertificate {
         chain.dropFirst().reversed().map(PresentedCertificate.init)
     }
 
+    /// The strictest host-name rule that accepts this certificate.
+    var hostNamesNeeded: CertificateHostNames {
+        if !hostMismatch { return .exact }
+        return issuedToSubdomain ? .subdomains : .any
+    }
+
     func problem(for connection: SavedConnection) -> CertificateTrustProblem {
+        // The pinned certificate itself is accepted whatever else is wrong
+        // with it — the probe reached the server it came from.
+        if let pin = connection.trustedCertSHA256,
+           pin.lowercased().filter({ $0 != ":" && $0 != " " }) == sha256 {
+            return .none
+        }
         if expired { return .expired }
         if !chainTrusted { return untrustedIssuer ? .untrustedIssuer : .invalidChain(chainProblem) }
-        if hostMismatch && connection.checksCertificateHostName { return .otherHostName }
+        if hostNamesNeeded > connection.certificateHostNames { return .otherHostName }
         return .none
     }
 }
@@ -80,16 +91,16 @@ extension SavedConnection {
 
     mutating func trust(_ decision: CertificateTrustDecision) {
         switch decision {
-        case let .certificateAuthority(der, acceptingOtherHostNames):
+        case let .certificateAuthority(der, hostNames):
             if !trustedCACertificates.contains(der) { trustedCACertificates.append(der) }
             // A server certificate trusted on its own before is covered now
             // — and keeping it would only hide that it's been replaced.
             trustedCertSHA256 = nil
-            if acceptingOtherHostNames { checksCertificateHostName = false }
+            certificateHostNames = max(certificateHostNames, hostNames)
         case let .certificate(sha256):
             trustedCertSHA256 = sha256
-        case .otherHostNames:
-            checksCertificateHostName = false
+        case let .hostNames(hostNames):
+            certificateHostNames = max(certificateHostNames, hostNames)
         }
     }
 }
