@@ -21,6 +21,9 @@ struct DirectoryTreeView: View {
     let onEditSavedSearches: (([SavedLDAPFilter]) -> [SavedLDAPFilter]) -> Void
     /// Opens a search as a table in the detail view.
     let onOpenSearch: (SearchQuery) -> Void
+    /// The detail view shows search results rather than the selected entry,
+    /// so menu commands for the selected entry are off.
+    let isShowingSearchResults: Bool
     /// Branch-level delete / move / copy / export, shared with the detail
     /// view; `BrowserView` shows its progress and confirmations.
     let operations: BranchOperations
@@ -183,14 +186,18 @@ struct DirectoryTreeView: View {
         .sheet(item: $entryForTestBind) { entry in
             TestBindSheet(connection: connection, dn: entry.dn)
         }
-        .focusedSceneValue(\.directoryCommands, DirectoryCommands(
+        .focusedSceneValue(\.directoryCommands, isShowingSearchResults ? directoryCommands.withoutSelection : directoryCommands)
+    }
+
+    private var directoryCommands: DirectoryCommands {
+        DirectoryCommands(
             newEntry: { newEntryRequest = NewEntryRequest(parentDN: selection ?? tree.baseDN) },
             importLDIF: { importLDIF() },
             openSchema: { openWindow(id: "schema", value: connection) },
             openLDIFEditor: { openWindow(id: "ldif", value: connection) },
             openServerInfo: { openWindow(id: "serverInfo", value: connection) },
             find: { beginSearch() },
-            advancedSearch: { onOpenSearch(SearchQuery()) },
+            advancedSearch: { openSearchWithConditions() },
             goToDN: { openGoTo() },
             reloadTree: { reloadTree() },
             toggleBookmark: selection.map { dn in { onToggleBookmark(dn) } },
@@ -220,7 +227,7 @@ struct DirectoryTreeView: View {
                 (!isReadOnly && GroupMembersSheet.isGroup(node.summaryEntry))
                     ? { groupForMembersEditing = node.summaryEntry } : nil
             }
-        ))
+        )
     }
 
     // MARK: - Tree
@@ -358,6 +365,16 @@ struct DirectoryTreeView: View {
         isSearchFieldFocused = true
     }
 
+    /// Opens the table: with what the search field holds while it's in use,
+    /// else a blank search.
+    private func openSearchWithConditions() {
+        let query = isSearchMode
+            ? QuickSearchPanel.query(text: searchText, kind: searchKind, baseDN: searchBaseDN)
+            : SearchQuery()
+        endSearch()
+        onOpenSearch(query)
+    }
+
     /// Leaves the search for the tree, keeping the chips as they were.
     private func endSearch() {
         searchText = ""
@@ -456,7 +473,7 @@ struct DirectoryTreeView: View {
             bookmarksMenu
 
             Button {
-                onOpenSearch(SearchQuery())
+                openSearchWithConditions()
             } label: {
                 Image(systemName: "slider.horizontal.3")
             }

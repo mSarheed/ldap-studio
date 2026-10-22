@@ -57,8 +57,12 @@ struct QuickSearchPanel: View {
 
     private var trimmedText: String { text.trimmingCharacters(in: .whitespaces) }
 
-    private var query: SearchQuery {
-        let trimmed = trimmedText
+    private var query: SearchQuery { Self.query(text: text, kind: kind, baseDN: baseDN) }
+
+    /// The search the field, chips and branch menu describe; a filter in
+    /// parentheses is used as it is.
+    static func query(text: String, kind: EntryKind, baseDN: String?) -> SearchQuery {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
         if trimmed.hasPrefix("(") {
             return SearchQuery(kind: kind, rawFilter: trimmed, baseDN: baseDN)
         }
@@ -82,6 +86,15 @@ struct QuickSearchPanel: View {
             }
         }
         .task(id: SearchKey(text: trimmedText, kind: kind, baseDN: baseDN)) { await search() }
+        .background {
+            // Here rather than on the results' button, so it works before
+            // anything is typed too.
+            Button("Open as Table") { openTable() }
+                .keyboardShortcut(.return, modifiers: .command)
+                .opacity(0)
+                .frame(width: 0, height: 0)
+                .accessibilityHidden(true)
+        }
     }
 
     // MARK: - Chips
@@ -278,7 +291,6 @@ struct QuickSearchPanel: View {
                 Spacer(minLength: 4)
                 Button("Open as Table") { openTable() }
                     .buttonStyle(.link)
-                    .keyboardShortcut(.return, modifiers: .command)
                     .help("Show these results as a table, to add conditions or act on many (⌘↩)")
             }
             .font(.caption)
@@ -410,8 +422,8 @@ struct QuickSearchPanel: View {
         onReveal(dn)
     }
 
+    /// The table records the search when it runs it.
     private func openTable() {
-        record()
         onOpenTable(query)
     }
 

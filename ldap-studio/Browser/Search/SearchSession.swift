@@ -185,10 +185,21 @@ final class SearchSession {
         }
         let ancestorKey = DN.normalize(ancestor)
         let generation = generation
-        let (keys, revision) = await store.keys()
-        // A search started meanwhile, or another change, replaced the hits
-        // these keys are for.
-        guard generation == self.generation, revision == store.revision else { return }
+        var keys: [String] = []
+        var isCurrent = false
+        // A page arriving while the keys are worked out makes them out of
+        // date; try again a few times, then work them out here.
+        for _ in 0..<3 {
+            let (fresh, revision) = await store.keys()
+            // A new search replaced these results: the change is moot.
+            guard generation == self.generation else { return }
+            if revision == store.revision {
+                keys = fresh
+                isCurrent = true
+                break
+            }
+        }
+        if !isCurrent { keys = store.hits.map(\.dn).map(DN.normalize) }
         let affected = Set(keys.indices.filter { DN.keyIsWithin(keys[$0], ancestorKey) })
         guard !affected.isEmpty else { return }
         switch change {

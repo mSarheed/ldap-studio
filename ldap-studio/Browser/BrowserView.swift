@@ -52,6 +52,9 @@ struct BrowserView: View {
     /// its results are one click away.
     @State private var searchSession: SearchSession?
     @State private var isShowingSearch = false
+    /// Set while `apply` moves or clears the selection itself (an entry
+    /// was moved or deleted), which isn't the user opening an entry.
+    @State private var selectionChangeKeepsSearch: String??
     /// Export / move / delete of search results. Shown over the whole
     /// window, like `operations`, so a delete keeps its progress and Cancel
     /// when an entry is opened meanwhile — but it leaves the selection
@@ -155,7 +158,11 @@ struct BrowserView: View {
             pendingSSHHostKey = nil
             Task { await reload(selecting: selection) }
         }
-        .onChange(of: selection) {
+        .onChange(of: selection) { _, newValue in
+            if let kept = selectionChangeKeepsSearch {
+                selectionChangeKeepsSearch = nil
+                if kept == newValue { return }
+            }
             // An entry picked in the tree or the search field is shown in
             // place of the table.
             isShowingSearch = false
@@ -225,6 +232,7 @@ struct BrowserView: View {
             onToggleBookmark: toggleBookmark,
             onEditSavedSearches: editSavedSearches,
             onOpenSearch: openSearch,
+            isShowingSearchResults: isShowingSearch && searchSession != nil,
             operations: operations,
             onChange: { change in await apply(change) },
             onRefreshDetail: { detailReloadToken += 1 }
@@ -471,13 +479,13 @@ struct BrowserView: View {
             await tree.entryAdded(dn)
         case let .removed(dn):
             tree.entryRemoved(dn)
-            if let selected = selection, DN.isWithin(selected, dn) { selection = nil }
+            if let selected = selection, DN.isWithin(selected, dn) { reconcileSelection(nil) }
         case let .moved(from, to):
             await tree.entryMoved(from: from, to: to)
             if let selected = selection, DN.isWithin(selected, from) {
                 let moved = DN.rebase(selected, from: from, to: to)
                 // The server's spelling, so it matches the tree row's tag.
-                selection = tree.node(moved)?.dn ?? moved
+                reconcileSelection(tree.node(moved)?.dn ?? moved)
             }
         case let .modified(dn):
             await tree.entryModified(dn)
@@ -486,6 +494,14 @@ struct BrowserView: View {
             await tree.branchChanged(dn)
             if let selected = selection, DN.isWithin(selected, dn) { detailReloadToken += 1 }
         }
+    }
+
+    /// Follows the selected entry through a move or delete, leaving the
+    /// search results up if they're showing.
+    private func reconcileSelection(_ dn: String?) {
+        guard dn != selection else { return }
+        if isShowingSearch { selectionChangeKeepsSearch = .some(dn) }
+        selection = dn
     }
 
     /// Reconnects, keeping `dn` selected if the new tree can reach it.
