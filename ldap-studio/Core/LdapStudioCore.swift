@@ -477,6 +477,7 @@ nonisolated private func logged<T>(_ kind: OperationLog.Kind, endpoint: String,
                                    summary: String, detail: String,
                                    result: (() -> String)? = nil,
                                    _ work: () async throws -> T) async throws -> T {
+    let summary = OperationOrigin.current.map { "[\($0)] \(summary)" } ?? summary
     let start = DispatchTime.now()
     func ms() -> Double {
         Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000

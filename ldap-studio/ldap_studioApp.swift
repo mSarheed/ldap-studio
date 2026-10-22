@@ -8,15 +8,19 @@
 import AppKit
 import SwiftUI
 
-/// Fires the one-per-day update check once the app is actually up.
+/// Fires the one-per-day update check once the app is actually up, and
+/// starts the MCP server if the user left it on.
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
+        MCPServerController.shared.startIfEnabled()
         Task { await UpdateChecker.shared.checkOnLaunch() }
     }
 
-    /// Lets in-flight timed-out connection attempts finish unwinding and
-    /// closes the SSH tunnels kept warm for reuse (see shutdownCore).
+    /// Stops the MCP server, lets in-flight timed-out connection attempts
+    /// finish unwinding and closes the SSH tunnels kept warm for reuse (see
+    /// shutdownCore).
     func applicationWillTerminate(_ notification: Notification) {
+        MCPServerController.shared.shutdown()
         shutdownCore()
     }
 }
@@ -27,10 +31,15 @@ struct ldap_studioApp: App {
 
     /// One store for the whole app — the Home window edits it, and the
     /// browser windows read it (and write back a trusted certificate when
-    /// the user accepts one). Injected into every scene below.
-    @State private var store = ConnectionStore()
+    /// the user accepts one). Injected into every scene below, and read by
+    /// the MCP server.
+    @State private var store: ConnectionStore
 
     init() {
+        let store = ConnectionStore()
+        _store = State(initialValue: store)
+        MCPServerController.shared.attach(store)
+
         // This is a multi-window utility app, not a document app — macOS
         // window tabbing (and the empty "New Tab") makes no sense here, so
         // turn it off entirely. Also drops "Show Tab Bar" from the View menu.
@@ -82,6 +91,14 @@ struct ldap_studioApp: App {
                 LiveConnection(snapshot: connection) { ServerInfoView(connection: $0) }
                     .environment(store)
             }
+        }
+
+        Settings {
+            TabView {
+                MCPSettingsView()
+                    .tabItem { Label("MCP Server", systemImage: "point.3.connected.trianglepath.dotted") }
+            }
+            .environment(store)
         }
 
         Window("About Ldap Studio", id: "about") {

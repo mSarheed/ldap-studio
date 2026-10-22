@@ -9,6 +9,10 @@ import Security
 enum KeychainService {
     private static let service = "app.ldap-studio.connection-password"
     private static let sshService = "app.ldap-studio.ssh-password"
+    private static let mcpService = "app.ldap-studio.mcp-token"
+    /// There's one MCP access token, not one per connection; the helpers
+    /// below key everything by a UUID, so it gets a fixed one.
+    private static let mcpTokenAccount = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
 
     /// What's been read or written this session, by service and account —
     /// absent ones too, but not lookups that failed some other way (a locked
@@ -70,6 +74,14 @@ enum KeychainService {
 
     static func readSSHPassword(for id: UUID) -> String? {
         readSecret(service: sshService, id: id)
+    }
+
+    static func saveMCPToken(_ token: String) {
+        saveSecret(token, service: mcpService, id: mcpTokenAccount)
+    }
+
+    static func readMCPToken() -> String? {
+        readSecret(service: mcpService, id: mcpTokenAccount)
     }
 
     private static func saveSecret(_ value: String, service: String, id: UUID) {

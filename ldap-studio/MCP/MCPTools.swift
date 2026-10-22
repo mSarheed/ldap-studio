@@ -1,0 +1,599 @@
+//
+//  MCPTools.swift
+//  ldap-studio
+//
+//  The tools the MCP server offers AI agents. Every one is a read: they
+//  reach directories through `ReadOnlyDirectory` only, see only the
+//  connections the user shared with agents, never see a password, and
+//  hand back results small enough to fit in a model's context.
+//
+
+import Foundation
+
+@MainActor
+final class MCPTools {
+    /// The saved connections, read afresh for every call so turning a
+    /// connection's sharing off takes effect on the next request.
+    private let connections: () -> [SavedConnection]
+    /// Attribute names the user added to the always-hidden ones.
+    private let extraHidden: () -> [String]
+
+    init(connections: @escaping () -> [SavedConnection], extraHidden: @escaping () -> [String] = { [] }) {
+        self.connections = connections
+        self.extraHidden = extraHidden
+    }
+
+    // MARK: Limits
+
+    nonisolated static let defaultSearchLimit = 50
+    nonisolated static let maxSearchLimit = 500
+    nonisolated static let defaultChildLimit = 200
+    nonisolated static let maxChildLimit = 1000
+    /// Results stop growing past this much JSON, however many entries were
+    /// asked for — beyond it they'd swamp the agent's context anyway.
+    nonisolated static let maxResultBytes = 256 * 1024
+    nonisolated static let maxValuesPerAttribute = 100
+    nonisolated static let maxValueLength = 2000
+    nonisolated static let maxInputLength = 4096
+    nonisolated static let maxRequestedAttributes = 100
+    /// A call still running after this long is cancelled.
+    nonisolated static let callTimeout: Duration = .seconds(90)
+    /// Calls running at once; the rest wait. Keeps an agent that fires off
+    /// many requests from taking every pooled connection the app's own
+    /// windows use.
+    nonisolated static let maxConcurrentCalls = 3
+
+    private var running = 0
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+
+    /// When reading each connection's schema last failed — it isn't asked
+    /// for again on every call for a while.
+    private var schemaFailures: [SavedConnection: ContinuousClock.Instant] = [:]
+    nonisolated private static let schemaRetryInterval: Duration = .seconds(300)
+
+    // MARK: Definitions
+
+    nonisolated static let definitions: [JSONValue] = [
+        tool("list_connections",
+             title: "List LDAP connections",
+             description: "Lists the LDAP directories the user has shared with agents in LDAP Studio. Call this first: every other tool takes one of these connection names.",
+             properties: [:], required: []),
+        tool("get_server_info",
+             title: "Get LDAP server info",
+             description: "Reads the server's root DSE: naming contexts (the top-level DNs), vendor and version, supported LDAP controls, extensions and SASL mechanisms.",
+             properties: ["connection": connectionProperty], required: ["connection"]),
+        tool("search",
+             title: "Search an LDAP directory",
+             description: "Runs an LDAP search with an RFC 4515 filter, e.g. (&(objectClass=person)(sn=Smith*)). Returns at most `limit` entries; narrow the filter or base_dn rather than raising the limit when results are cut short. Attributes holding secrets (userPassword and the like) are never returned and can't be used in the filter.",
+             properties: [
+                 "connection": connectionProperty,
+                 "filter": ["type": "string", "description": "RFC 4515 filter in parentheses. Default: (objectClass=*)."],
+                 "base_dn": ["type": "string", "description": "Where to search from. Default: the connection's base DN."],
+                 "scope": ["type": "string", "enum": ["base", "one", "sub"], "description": "base = just base_dn, one = its direct children, sub = everything below it (default)."],
+                 "attributes": attributesProperty,
+                 "include_operational": operationalProperty,
+                 "limit": ["type": "integer", "minimum": 1, "maximum": .int(maxSearchLimit), "description": .string("Most entries to return. Default \(defaultSearchLimit), at most \(maxSearchLimit).")],
+             ], required: ["connection"]),
+        tool("get_entry",
+             title: "Read an LDAP entry",
+             description: "Reads one entry by its DN, with all its attributes (or only those asked for).",
+             properties: [
+                 "connection": connectionProperty,
+                 "dn": ["type": "string", "description": "The entry's distinguished name."],
+                 "attributes": attributesProperty,
+                 "include_operational": operationalProperty,
+             ], required: ["connection", "dn"]),
+        tool("list_children",
+             title: "List an LDAP entry's children",
+             description: "Lists the entries directly below a DN — one level of the directory tree — with their object classes and whether they have children of their own. Use it to explore a directory's layout.",
+             properties: [
+                 "connection": connectionProperty,
+                 "dn": ["type": "string", "description": "The parent entry. Default: the connection's base DN. An empty string lists the server's naming contexts."],
+                 "limit": ["type": "integer", "minimum": 1, "maximum": .int(maxChildLimit), "description": .string("Most children to return. Default \(defaultChildLimit), at most \(maxChildLimit).")],
+             ], required: ["connection"]),
+        tool("get_schema",
+             title: "Look up the LDAP schema",
+             description: "Looks up the directory's schema. With object_class: that class's required (MUST) and optional (MAY) attributes, inherited ones included. With attribute: that attribute type's syntax, matching rules and whether it's single-valued. With neither: the names of every object class and attribute type, optionally narrowed by `contains`.",
+             properties: [
+                 "connection": connectionProperty,
+                 "object_class": ["type": "string", "description": "An object class name, e.g. inetOrgPerson."],
+                 "attribute": ["type": "string", "description": "An attribute type name, e.g. mail."],
+                 "contains": ["type": "string", "description": "When listing names, only those containing this text (case-insensitive)."],
+             ], required: ["connection"]),
+    ]
+
+    nonisolated private static let connectionProperty: JSONValue = [
+        "type": "string",
+        "description": "A connection name from list_connections.",
+    ]
+    nonisolated private static let attributesProperty: JSONValue = [
+        "type": "array", "items": ["type": "string"],
+        "description": "Attribute names to return. Default: every user attribute.",
+    ]
+    nonisolated private static let operationalProperty: JSONValue = [
+        "type": "boolean",
+        "description": "Also return operational attributes (createTimestamp, modifiersName, entryUUID, memberOf on some servers…). Default false.",
+    ]
+
+    nonisolated private static func tool(_ name: String, title: String, description: String,
+                                         properties: [String: JSONValue], required: [String]) -> JSONValue {
+        [
+            "name": .string(name),
+            "title": .string(title),
+            "description": .string(description),
+            "inputSchema": [
+                "type": "object",
+                "properties": .object(properties),
+                "required": JSONValue(required),
+                "additionalProperties": false,
+            ],
+            "annotations": [
+                "title": .string(title),
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false,
+            ],
+        ]
+    }
+
+    nonisolated static var toolNames: Set<String> {
+        Set(definitions.compactMap { $0["name"]?.stringValue })
+    }
+
+    // MARK: Calling
+
+    /// A mistake the agent can correct — reported as a tool error, so the
+    /// model sees it, rather than as a protocol error.
+    nonisolated struct ToolError: Error, CustomStringConvertible {
+        let description: String
+        init(_ description: String) { self.description = description }
+    }
+
+    /// Runs tool `name`. Returns the result's text and whether it's an
+    /// error; `name` must be one of `toolNames`.
+    func call(_ name: String, arguments: [String: JSONValue]) async -> (text: String, isError: Bool) {
+        await acquireSlot()
+        defer { releaseSlot() }
+        do {
+            let result = try await withTimeout(Self.callTimeout) {
+                try await OperationOrigin.$current.withValue("MCP") {
+                    try await self.run(name, Arguments(arguments))
+                }
+            }
+            return (result.encodedString, false)
+        } catch is TimeoutError {
+            return ("Stopped after \(Self.callTimeout.components.seconds) seconds without finishing. Narrow the search (a more specific filter or base_dn).", true)
+        } catch is CancellationError {
+            return ("Cancelled.", true)
+        } catch {
+            return ("\(error)", true)
+        }
+    }
+
+    private func run(_ name: String, _ args: Arguments) async throws -> JSONValue {
+        switch name {
+        case "list_connections": return listConnections()
+        case "get_server_info": return try await serverInfo(args)
+        case "search": return try await search(args)
+        case "get_entry": return try await entry(args)
+        case "list_children": return try await children(args)
+        case "get_schema": return try await schema(args)
+        default: throw ToolError("Unknown tool \"\(name)\".")
+        }
+    }
+
+    // MARK: Tools
+
+    private var shared: [SavedConnection] {
+        connections()
+            .filter(\.allowsMCP)
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    private func listConnections() -> JSONValue {
+        let list: [JSONValue] = shared.map { connection in
+            [
+                "name": .string(connection.name),
+                "server": .string("\(connection.useSSL ? "ldaps" : "ldap")://\(connection.host):\(connection.port)"),
+                "base_dn": .string(connection.baseDN),
+                "bind": .string(bindDescription(connection)),
+            ]
+        }
+        return [
+            "connections": .array(list),
+            "note": list.isEmpty
+                ? "No directories are shared with agents yet. The user can share one in LDAP Studio → Settings → MCP Server."
+                : "Every tool is read-only. What's visible depends on the permissions of each connection's bind.",
+        ]
+    }
+
+    private func bindDescription(_ connection: SavedConnection) -> String {
+        guard connection.bindDN.isEmpty else { return connection.bindDN }
+        return connection.authentication == .simple ? "anonymous" : connection.authentication.title
+    }
+
+    private func serverInfo(_ args: Arguments) async throws -> JSONValue {
+        let (directory, policy) = try await open(args)
+        guard let dse = try await directory.entry(dn: "", attributes: ["*", "+"], includeOperational: true) else {
+            throw ToolError("The server didn't return its root DSE.")
+        }
+        return [
+            "connection": .string(directory.connection.name),
+            "root_dse": render(dse, policy: policy),
+        ]
+    }
+
+    private func search(_ args: Arguments) async throws -> JSONValue {
+        let (directory, policy) = try await open(args)
+        let filter = try args.string("filter") ?? "(objectClass=*)"
+        try checkLength(filter, "filter")
+        do { try policy.check(filter: filter) } catch { throw ToolError("\(error)") }
+        let base = try baseDN(args.string("base_dn"), of: directory)
+        let scope: LdapSearchScope = switch try args.string("scope") ?? "sub" {
+        case "base": .base
+        case "one": .oneLevel
+        case "sub": .subtree
+        case let other: throw ToolError("scope must be base, one or sub, not \"\(other)\".")
+        }
+        let attributes = try requestedAttributes(args, policy: policy)
+        let limit = try args.int("limit", default: Self.defaultSearchLimit, in: 1...Self.maxSearchLimit)
+
+        var collector = ResultCollector()
+        let outcome = try await directory.search(LdapSearchRequest(
+            baseDn: base, scope: scope, filter: filter, attributes: attributes,
+            includeOperational: try args.bool("include_operational"), limit: limit,
+            pageSize: scope == .base ? 0 : min(limit, 500)
+        )) { page, _ in
+            for entry in page where !collector.add(render(entry, policy: policy)) { return false }
+            return true
+        }
+        var result: [String: JSONValue] = [
+            "connection": .string(directory.connection.name),
+            "base_dn": .string(base),
+            "filter": .string(filter),
+            "count": .int(collector.items.count),
+            "complete": .bool(outcome.isComplete && !collector.isFull),
+            "entries": .array(collector.items),
+        ]
+        if collector.isFull {
+            result["note"] = .string("Stopped once the results reached \(Self.maxResultBytes / 1024) KB. Ask for fewer attributes, or narrow the filter or base_dn.")
+        } else if outcome.wasTruncated {
+            result["note"] = .string("The server stopped early at its own size limit, so these are only some of the matches. Narrow the filter or base_dn.")
+        } else if !outcome.isComplete {
+            result["note"] = .string("Stopped at the limit of \(limit). There may be more; narrow the filter or base_dn, or raise limit (at most \(Self.maxSearchLimit)).")
+        }
+        return .object(result)
+    }
+
+    private func entry(_ args: Arguments) async throws -> JSONValue {
+        let (directory, policy) = try await open(args)
+        guard let dn = try args.string("dn") else { throw ToolError("dn is required.") }
+        try checkLength(dn, "dn")
+        let attributes = try requestedAttributes(args, policy: policy)
+        guard let entry = try await directory.entry(dn: dn, attributes: attributes,
+                                                    includeOperational: try args.bool("include_operational")) else {
+            throw ToolError("There's no entry \"\(dn)\", or this connection's bind isn't allowed to see it.")
+        }
+        return render(entry, policy: policy)
+    }
+
+    private func children(_ args: Arguments) async throws -> JSONValue {
+        let (directory, _) = try await open(args)
+        let limit = try args.int("limit", default: Self.defaultChildLimit, in: 1...Self.maxChildLimit)
+        let dn = try args.string("dn") ?? directory.connection.baseDN
+        try checkLength(dn, "dn")
+
+        var rows: [TreeRow] = []
+        var isComplete = true
+        if dn.isEmpty {
+            let dse = try await directory.entry(dn: "", attributes: ["namingContexts"])
+            for context in (dse?.values("namingContexts") ?? []).prefix(limit) {
+                if let entry = try await directory.entry(dn: context, attributes: TreeRow.treeAttributes) {
+                    rows.append(TreeRow(entry))
+                }
+            }
+        } else {
+            let outcome = try await directory.search(LdapSearchRequest(
+                baseDn: dn, scope: .oneLevel, attributes: TreeRow.treeAttributes,
+                limit: limit, pageSize: min(limit, 500)
+            )) { page, _ in
+                rows += page.map(TreeRow.init)
+                return true
+            }
+            isComplete = outcome.isComplete
+        }
+        rows.sort { $0.sortKey < $1.sortKey }
+        var result: [String: JSONValue] = [
+            "connection": .string(directory.connection.name),
+            "dn": .string(dn),
+            "count": .int(rows.count),
+            "complete": .bool(isComplete),
+            "children": .array(rows.map { row in
+                [
+                    "dn": .string(row.dn),
+                    "object_classes": JSONValue(row.objectClasses),
+                    "has_children": .bool(row.mayHaveChildren),
+                ]
+            }),
+        ]
+        if !isComplete {
+            result["note"] = .string("Only the first \(rows.count) children. Use search with a filter to find specific ones.")
+        }
+        return .object(result)
+    }
+
+    private func schema(_ args: Arguments) async throws -> JSONValue {
+        let (directory, policy) = try await open(args)
+        let schema: LdapSchema
+        do { schema = try await directory.schema() } catch {
+            throw ToolError("Couldn't read the schema: \(error)")
+        }
+        func named(_ name: String) -> (String) -> Bool {
+            { $0.caseInsensitiveCompare(name) == .orderedSame }
+        }
+
+        if let name = try args.string("object_class") {
+            guard let objectClass = schema.objectClasses.first(where: { $0.names.contains(where: named(name)) || $0.oid == name }) else {
+                throw ToolError("The schema has no object class \"\(name)\".")
+            }
+            var chain: [String] = []
+            var next = objectClass.superiorClasses
+            while let superior = next.first, chain.count < 32 {
+                next.removeFirst()
+                guard !chain.contains(where: named(superior)) else { continue }
+                chain.append(superior)
+                next += schema.objectClasses.first { $0.names.contains(where: named(superior)) }?.superiorClasses ?? []
+            }
+            let all = schema.requiredAndOptionalAttributes(forObjectClasses: objectClass.names.prefix(1).map { $0 })
+            return [
+                "names": JSONValue(objectClass.names),
+                "oid": .string(objectClass.oid),
+                "description": JSONValue(objectClass.description),
+                "kind": .string(objectClass.kind),
+                "obsolete": .bool(objectClass.obsolete),
+                "superior_classes": JSONValue(chain),
+                "must": JSONValue(all.must),
+                "may": JSONValue(all.may),
+            ]
+        }
+        if let name = try args.string("attribute") {
+            guard let type = schema.attributeTypes.first(where: { $0.names.contains(where: named(name)) || $0.oid == name }) else {
+                throw ToolError("The schema has no attribute type \"\(name)\".")
+            }
+            var result: [String: JSONValue] = [
+                "names": JSONValue(type.names),
+                "oid": .string(type.oid),
+                "description": JSONValue(type.description),
+                "superior_type": JSONValue(type.superiorType),
+                "syntax": JSONValue(type.syntaxOid),
+                "equality": JSONValue(type.equalityMatchingRule),
+                "ordering": JSONValue(type.orderingMatchingRule),
+                "substring": JSONValue(type.substringMatchingRule),
+                "single_valued": .bool(type.singleValued),
+                "no_user_modification": .bool(type.noUserModification),
+                "usage": JSONValue(type.usage),
+                "obsolete": .bool(type.obsolete),
+            ]
+            if policy.isHidden(type.names.first ?? type.oid) {
+                result["note"] = "LDAP Studio never returns this attribute's values to agents."
+            }
+            return .object(result)
+        }
+        let contains = try args.string("contains")
+        func matching(_ names: [String]) -> [String] {
+            names.filter { contains == nil || $0.localizedCaseInsensitiveContains(contains!) }
+                .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+        }
+        return [
+            "object_classes": JSONValue(matching(schema.objectClasses.compactMap(\.names.first))),
+            "attributes": JSONValue(matching(schema.attributeTypes.compactMap(\.names.first))),
+        ]
+    }
+
+    // MARK: Helpers
+
+    /// The shared connection the call names, and what it may see. The
+    /// schema is read (once per session) to learn the hidden attributes'
+    /// aliases and OIDs; a server that won't give it out still works,
+    /// with OIDs refused.
+    private func open(_ args: Arguments) async throws -> (ReadOnlyDirectory, MCPAttributePolicy) {
+        guard let name = try args.string("connection"), !name.isEmpty else {
+            throw ToolError("connection is required — call list_connections for the names.")
+        }
+        let shared = shared
+        guard let connection = shared.first(where: { $0.name == name })
+            ?? shared.first(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) else {
+            let names = shared.map { "\"\($0.name)\"" }.joined(separator: ", ")
+            throw ToolError("No connection named \"\(name)\" is shared with agents. "
+                + (names.isEmpty ? "None are: the user can share one in LDAP Studio → Settings → MCP Server."
+                                 : "Shared connections: \(names)."))
+        }
+        let directory = ReadOnlyDirectory(connection)
+        var schema: LdapSchema?
+        if schemaFailures[connection].map({ ContinuousClock.now - $0 > Self.schemaRetryInterval }) ?? true {
+            do {
+                schema = try await directory.schema()
+                schemaFailures[connection] = nil
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                schemaFailures[connection] = .now
+            }
+        }
+        return (directory, MCPAttributePolicy(extraHidden: extraHidden(), schema: schema))
+    }
+
+    private func baseDN(_ requested: String?, of directory: ReadOnlyDirectory) throws -> String {
+        let base = requested ?? directory.connection.baseDN
+        try checkLength(base, "base_dn")
+        guard !base.isEmpty else {
+            throw ToolError("This connection has no base DN; pass base_dn (get_server_info lists the naming contexts).")
+        }
+        return base
+    }
+
+    private func requestedAttributes(_ args: Arguments, policy: MCPAttributePolicy) throws -> [String]? {
+        guard let attributes = try args.strings("attributes"), !attributes.isEmpty else { return nil }
+        guard attributes.count <= Self.maxRequestedAttributes else {
+            throw ToolError("Ask for at most \(Self.maxRequestedAttributes) attributes.")
+        }
+        for attribute in attributes where !["*", "+", "1.1"].contains(attribute) {
+            do { try policy.check(attribute) } catch { throw ToolError("\(error)") }
+        }
+        return attributes
+    }
+
+    private func checkLength(_ value: String, _ name: String) throws {
+        guard value.utf8.count <= Self.maxInputLength else {
+            throw ToolError("\(name) is too long (at most \(Self.maxInputLength) bytes).")
+        }
+    }
+
+    /// One entry as the agent sees it: hidden attributes dropped (but
+    /// named), binary values described rather than dumped, and long
+    /// values and attributes cut short.
+    private func render(_ entry: LdapEntry, policy: MCPAttributePolicy) -> JSONValue {
+        var order: [String] = []
+        var values: [String: [String]] = [:]
+        var totals: [String: Int] = [:]
+        var hidden: [String] = []
+        for attribute in entry.attributes {
+            if policy.isHidden(attribute.name) {
+                if !hidden.contains(attribute.name) { hidden.append(attribute.name) }
+                continue
+            }
+            if values[attribute.name] == nil { order.append(attribute.name) }
+            totals[attribute.name, default: 0] += 1
+            guard totals[attribute.name]! <= Self.maxValuesPerAttribute else { continue }
+            values[attribute.name, default: []].append(Self.displayValue(attribute))
+        }
+        var json: [String: JSONValue] = [
+            "dn": .string(entry.dn),
+            "attributes": .object(values.mapValues { JSONValue($0) }),
+        ]
+        let cut = totals.filter { $0.value > Self.maxValuesPerAttribute }
+        if !cut.isEmpty {
+            json["values_not_shown"] = .object(cut.mapValues { .int($0 - Self.maxValuesPerAttribute) })
+        }
+        if !hidden.isEmpty {
+            json["hidden_attributes"] = JSONValue(hidden)
+        }
+        return .object(json)
+    }
+
+    nonisolated static func displayValue(_ attribute: LdapAttribute) -> String {
+        if attribute.isBinary {
+            let bytes = Data(base64Encoded: attribute.value)?.count ?? attribute.value.count * 3 / 4
+            return "(binary value, \(bytes) bytes — not shown)"
+        }
+        guard attribute.value.count > maxValueLength else { return attribute.value }
+        return String(attribute.value.prefix(maxValueLength)) + "… (\(attribute.value.count - maxValueLength) more characters)"
+    }
+
+    // MARK: Concurrency
+
+    private func acquireSlot() async {
+        if running < Self.maxConcurrentCalls {
+            running += 1
+            return
+        }
+        await withCheckedContinuation { waiting.append($0) }
+    }
+
+    private func releaseSlot() {
+        if waiting.isEmpty {
+            running -= 1
+        } else {
+            waiting.removeFirst().resume()
+        }
+    }
+}
+
+// MARK: - Support
+
+/// A tool call's `arguments`, with type checking that tells the agent
+/// what it got wrong.
+private struct Arguments {
+    let values: [String: JSONValue]
+    init(_ values: [String: JSONValue]) { self.values = values }
+
+    func string(_ key: String) throws -> String? {
+        switch values[key] {
+        case nil, .null?: return nil
+        case let .string(value)?: return value
+        default: throw MCPTools.ToolError("\(key) must be a string.")
+        }
+    }
+
+    func strings(_ key: String) throws -> [String]? {
+        switch values[key] {
+        case nil, .null?: return nil
+        case let .array(items)?:
+            return try items.map {
+                guard case let .string(value) = $0 else { throw MCPTools.ToolError("\(key) must be a list of strings.") }
+                return value
+            }
+        default: throw MCPTools.ToolError("\(key) must be a list of strings.")
+        }
+    }
+
+    func bool(_ key: String) throws -> Bool {
+        switch values[key] {
+        case nil, .null?: return false
+        case let .bool(value)?: return value
+        default: throw MCPTools.ToolError("\(key) must be true or false.")
+        }
+    }
+
+    func int(_ key: String, default value: Int, in range: ClosedRange<Int>) throws -> Int {
+        let number: Int
+        switch values[key] {
+        case nil, .null?: return value
+        case let .int(given)?: number = given
+        case let .double(given)? where given.rounded() == given && abs(given) < 1e9: number = Int(given)
+        default: throw MCPTools.ToolError("\(key) must be a whole number.")
+        }
+        guard range.contains(number) else {
+            throw MCPTools.ToolError("\(key) must be between \(range.lowerBound) and \(range.upperBound).")
+        }
+        return number
+    }
+}
+
+/// Gathers rendered entries until they'd pass `MCPTools.maxResultBytes`.
+private struct ResultCollector {
+    private(set) var items: [JSONValue] = []
+    private(set) var isFull = false
+    private var bytes = 0
+
+    /// False once full — the item wasn't added.
+    mutating func add(_ item: JSONValue) -> Bool {
+        let size = item.encoded().count + 1
+        guard bytes + size <= MCPTools.maxResultBytes else {
+            isFull = true
+            return false
+        }
+        bytes += size
+        items.append(item)
+        return true
+    }
+}
+
+nonisolated private struct TimeoutError: Error {}
+
+/// Runs `work`, cancelling it if it hasn't finished within `limit`.
+@MainActor
+private func withTimeout<T: Sendable>(_ limit: Duration,
+                                      _ work: @escaping @MainActor () async throws -> T) async throws -> T {
+    try await withThrowingTaskGroup(of: T.self) { group in
+        group.addTask { @MainActor in try await work() }
+        group.addTask {
+            try await Task.sleep(for: limit)
+            throw TimeoutError()
+        }
+        defer { group.cancelAll() }
+        guard let result = try await group.next() else { throw CancellationError() }
+        return result
+    }
+}
