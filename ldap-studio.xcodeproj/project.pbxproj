@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		5A7E10013026B0EE00251975 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 5A7E10023026B0EE00251975 /* Sparkle */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		042AE3963026B0ED00251975 /* ldap-studio.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "ldap-studio.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -36,6 +40,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				5A7E10013026B0EE00251975 /* Sparkle in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -80,6 +85,7 @@
 			);
 			name = "ldap-studio";
 			packageProductDependencies = (
+				5A7E10023026B0EE00251975 /* Sparkle */,
 			);
 			productName = "ldap-studio";
 			productReference = 042AE3963026B0ED00251975 /* ldap-studio.app */;
@@ -109,6 +115,9 @@
 			);
 			mainGroup = 042AE38D3026B0ED00251975;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				5A7E10033026B0EE00251975 /* XCRemoteSwiftPackageReference "Sparkle" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 042AE3973026B0ED00251975 /* Products */;
 			projectDirPath = "";
@@ -445,6 +454,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		5A7E10033026B0EE00251975 /* XCRemoteSwiftPackageReference "Sparkle" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/sparkle-project/Sparkle";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.10.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		5A7E10023026B0EE00251975 /* Sparkle */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 5A7E10033026B0EE00251975 /* XCRemoteSwiftPackageReference "Sparkle" */;
+			productName = Sparkle;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 042AE38E3026B0ED00251975 /* Project object */;
 }

@@ -25,7 +25,7 @@ Releases are signed with a Developer ID and notarized by Apple, so macOS opens t
 
 ### Updating
 
-LDAP Studio looks for a new version once a day, and whenever you choose **LDAP Studio → Check for Updates…**. To replace it, download the new DMG and drag the app over the old one.
+LDAP Studio looks for a new version once a day, and whenever you choose **LDAP Studio → Check for Updates…**. When there is one, it shows what's new and installs it for you, then relaunches. Updates come through [Sparkle](https://sparkle-project.org), which only installs a download signed with the project's key.
 
 ### Betas
 
@@ -93,6 +93,8 @@ A release must be newer than the latest stable one. Its notes are generated from
 
 `scripts/release-build.sh` does the work: it archives the app, exports it signed with Developer ID and hardened runtime, checks it with `scripts/release-verify.sh` (every binary signed by the team with a secure timestamp, no debugging entitlement, nothing linked from outside the bundle), notarizes and staples the app, then builds, signs, notarizes and staples the DMG. It also runs locally with your own Developer ID identity; see the comments at the top for the notarization settings, or set `SKIP_NOTARIZATION=1` to stop after signing.
 
+The ZIP is also the in-app update. The workflow signs it with the Sparkle key, and once the release is published, adds it to [`appcast.xml`](appcast.xml) on `main` (a beta on the `beta` channel) with `scripts/release-appcast.py`. That file is the feed installed apps check, so a release reaches them only once it's there.
+
 ### One-time setup
 
 In **Settings → Environments**, create an environment named `release`. Under **Deployment branches and tags**, allow only the `main` branch and tags matching `v*`. Then add to it:
@@ -105,6 +107,7 @@ In **Settings → Environments**, create an environment named `release`. Under *
 | `NOTARY_KEY_ID` | secret | The Key ID of an App Store Connect API key (Users and Access → Integrations → Team Keys) with the Developer role. |
 | `NOTARY_ISSUER_ID` | secret | The Issuer ID shown on that page. |
 | `NOTARY_PRIVATE_KEY` | secret | The contents of that key's `.p8` file. |
+| `SPARKLE_PRIVATE_KEY` | secret | The private key updates are signed with, exported with Sparkle's `generate_keys --account ldap-studio -x <file>`. Its public half is `SUPublicEDKey` in `ldap-studio/Info.plist`. Keep a backup of it. |
 
 ## License
 
