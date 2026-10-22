@@ -77,6 +77,11 @@ nonisolated public struct LDAPConnectionOptions: Hashable, Sendable {
     public var sshPassword: String
     public var sshPrivateKeyBookmark: Data?
     public var sshHostKeySHA256: String?
+    /// Certificate authorities (DER) this connection trusts besides the
+    /// bundled ones — see `ls_set_tls_trust`.
+    public var trustedCACertificates: [Data]
+    /// Off accepts a certificate issued to another host name.
+    public var checksCertificateHostName: Bool
 
     public init(chaseReferrals: Bool = false, timeoutSeconds: Int = 15,
                 authentication: LdapAuthenticationMethod = .simple,
@@ -85,7 +90,8 @@ nonisolated public struct LDAPConnectionOptions: Hashable, Sendable {
                 clientKeyBookmark: Data? = nil, useSSHTunnel: Bool = false,
                 sshHost: String = "", sshPort: Int = 22, sshUsername: String = "",
                 sshUsesPrivateKey: Bool = false, sshPassword: String = "",
-                sshPrivateKeyBookmark: Data? = nil, sshHostKeySHA256: String? = nil) {
+                sshPrivateKeyBookmark: Data? = nil, sshHostKeySHA256: String? = nil,
+                trustedCACertificates: [Data] = [], checksCertificateHostName: Bool = true) {
         self.chaseReferrals = chaseReferrals
         self.timeoutSeconds = timeoutSeconds
         self.authentication = authentication
@@ -101,6 +107,8 @@ nonisolated public struct LDAPConnectionOptions: Hashable, Sendable {
         self.sshPassword = sshPassword
         self.sshPrivateKeyBookmark = sshPrivateKeyBookmark
         self.sshHostKeySHA256 = sshHostKeySHA256
+        self.trustedCACertificates = trustedCACertificates
+        self.checksCertificateHostName = checksCertificateHostName
     }
 }
 
@@ -208,9 +216,9 @@ public enum ConnectionError: Error, CustomStringConvertible {
     case BindFailed(reason: String)
     case SearchFailed(reason: String)
     case ModifyFailed(reason: String)
-    /// TLS/StartTLS rejected the server's certificate, or it didn't match
-    /// the fingerprint trusted for this connection. The UI answers this by
-    /// probing the certificate and offering "Trust for this connection".
+    /// TLS/StartTLS rejected the server's certificate, or what this
+    /// connection trusts didn't accept it. The UI answers this by probing
+    /// the certificate and offering what to trust (CertificateTrustSheet).
     case TLSUntrusted(host: String, port: UInt16, reason: String)
     case SSHHostKeyUntrusted(host: String, port: UInt16, fingerprint: String)
     /// A write was attempted on a connection marked read-only. Blocked
@@ -466,7 +474,32 @@ nonisolated private func withConnectionPolicy<T>(_ options: LDAPConnectionOption
         sshKeyFile.path,
         options.sshHostKeySHA256 ?? ""
     )
+    setTLSTrust(trustedCACertificates: options.trustedCACertificates,
+                checksHostName: options.checksCertificateHostName)
     return work()
+}
+
+/// Pushes the certificate authorities a connection trusts (and whether
+/// the host name has to match) into the C core for the next connect.
+nonisolated private func setTLSTrust(trustedCACertificates: [Data], checksHostName: Bool) {
+    ls_set_tls_trust(PEM.encode(certificates: trustedCACertificates), checksHostName)
+}
+
+/// DER certificates to and from PEM, the form the C core speaks.
+nonisolated enum PEM {
+    static func encode(certificates: [Data]) -> String {
+        certificates.map { der in
+            let body = der.base64EncodedString(options: [.lineLength64Characters, .endLineWithLineFeed])
+            return "-----BEGIN CERTIFICATE-----\n\(body)\n-----END CERTIFICATE-----\n"
+        }.joined()
+    }
+
+    static func decodeCertificates(_ pem: String) -> [Data] {
+        pem.components(separatedBy: "-----BEGIN CERTIFICATE-----").dropFirst().compactMap { block in
+            guard let end = block.range(of: "-----END CERTIFICATE-----") else { return nil }
+            return Data(base64Encoded: String(block[..<end.lowerBound]), options: .ignoreUnknownCharacters)
+        }
+    }
 }
 
 /// Wraps an operation so it lands in the Operation Log with timing and
@@ -524,8 +557,8 @@ nonisolated public func setTLSPolicy(startTLS: Bool, allowUntrusted: Bool, pinne
     }
 }
 
-/// The server's leaf certificate as read back with verification disabled —
-/// for the "Trust for this connection" dialog.
+/// The server's certificate as read back with verification disabled — for
+/// the dialog that asks what to trust.
 public struct LdapCertificate: Sendable, Equatable {
     public let subject: String
     public let issuer: String
@@ -536,27 +569,52 @@ public struct LdapCertificate: Sendable, Equatable {
     public let selfSigned: Bool
     public let expired: Bool
     public let hostMismatch: Bool
+    /// Every certificate the server presented (DER), its own first — the
+    /// rest are the certificate authorities it sent along.
+    public let chain: [Data]
+    /// Whether `chain` leads to a certificate authority the connection
+    /// trusts (or a bundled one), expiry included and the host name aside.
+    public let chainTrusted: Bool
+    /// When it doesn't: whether that's for want of a trusted certificate
+    /// authority — the one thing trusting another can fix.
+    public let untrustedIssuer: Bool
+    /// When it doesn't: why, in words.
+    public let chainProblem: String
 }
 
-public func probeCertificate(host: String, port: UInt16, useSsl: Bool,
-                             startTLS: Bool) async throws -> LdapCertificate {
+/// Reads the server's certificate without verifying it, through the SSH
+/// tunnel in `options` if there is one. `options.trustedCACertificates`
+/// are what `chainTrusted` is judged against.
+public func probeCertificate(host: String, port: UInt16, useSsl: Bool, startTLS: Bool,
+                             options: LDAPConnectionOptions? = nil) async throws -> LdapCertificate {
     try await background {
-        var err = LSError()
-        var info = LSCertInfo()
-        let rc = ls_probe_certificate(host, port, useSsl, startTLS, &info, &err)
-        guard rc == 0 else { return .failure(swiftError(&err)) }
-        defer { ls_cert_info_dispose(&info) }
-        return .success(LdapCertificate(
-            subject: str(info.subject),
-            issuer: str(info.issuer),
-            sha256: str(info.sha256),
-            notBefore: str(info.not_before),
-            notAfter: str(info.not_after),
-            selfSigned: info.self_signed,
-            expired: info.expired,
-            hostMismatch: info.host_mismatch
-        ))
+        withConnectionPolicy(options ?? LDAPConnectionOptions()) {
+            probeCertificateNow(host: host, port: port, useSsl: useSsl, startTLS: startTLS)
+        }
     }
+}
+
+nonisolated private func probeCertificateNow(host: String, port: UInt16, useSsl: Bool,
+                                             startTLS: Bool) -> Result<LdapCertificate, Error> {
+    var err = LSError()
+    var info = LSCertInfo()
+    let rc = ls_probe_certificate(host, port, useSsl, startTLS, &info, &err)
+    guard rc == 0 else { return .failure(swiftError(&err)) }
+    defer { ls_cert_info_dispose(&info) }
+    return .success(LdapCertificate(
+        subject: str(info.subject),
+        issuer: str(info.issuer),
+        sha256: str(info.sha256),
+        notBefore: str(info.not_before),
+        notAfter: str(info.not_after),
+        selfSigned: info.self_signed,
+        expired: info.expired,
+        hostMismatch: info.host_mismatch,
+        chain: PEM.decodeCertificates(str(info.chain_pem)),
+        chainTrusted: info.chain_trusted,
+        untrustedIssuer: info.untrusted_issuer,
+        chainProblem: str(info.chain_problem)
+    ))
 }
 
 // MARK: - Public API

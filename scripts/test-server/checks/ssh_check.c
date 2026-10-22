@@ -2,7 +2,8 @@
  * pooled connections open through one tunnel at once and stream a large
  * branch side by side; a client that leaves responses unread doesn't
  * stall the others, and closing it doesn't kill the process; the tunnel
- * is reused afterwards. */
+ * is reused afterwards; the server's certificate is read and checked
+ * against a trusted certificate authority through the tunnel too. */
 #include <ldap.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -98,6 +99,54 @@ static void *stream(void *arg) {
   long i = (long)arg;
   counts[i] = count_people(conns[i]);
   return NULL;
+}
+
+/* The whole of a small file, or NULL. Caller frees. */
+static char *read_file(const char *path) {
+  FILE *f = fopen(path, "r");
+  if (!f) return NULL;
+  char *buf = calloc(1, 65536);
+  size_t n = fread(buf, 1, 65535, f);
+  fclose(f);
+  buf[n] = '\0';
+  return buf;
+}
+
+/* LDAPS to a server only the tunnel reaches: the trust dialog's probe and
+ * a trusted certificate authority both go through it, and the certificate
+ * is checked against the real host name, not the local forward's. */
+static void tls_through_tunnel(void) {
+  char path[1024];
+  snprintf(path, sizeof path, "%s/issuing-ca.crt", getenv("TEST_DIR"));
+  char *issuing = read_file(path);
+  policy();
+  LSCertInfo info = {0};
+  LSError e = {0};
+  int rc = ls_probe_certificate("localhost", 3636, true, false, &info, &e);
+  check(rc == LS_OK && !info.host_mismatch && !info.chain_trusted &&
+            info.untrusted_issuer,
+        "SSH: the certificate probe goes through the tunnel");
+  ls_cert_info_dispose(&info);
+  ls_error_dispose(&e);
+
+  policy();
+  ls_set_tls_trust(issuing, true);
+  rc = ls_test_connection("localhost", 3636, true,
+                          "cn=reader,ou=Service,dc=example,dc=com", "reader",
+                          &e);
+  check(rc == LS_OK, "SSH: LDAPS with a trusted certificate authority");
+  ls_error_dispose(&e);
+
+  policy();
+  ls_set_tls_trust(issuing, true);
+  rc = ls_test_connection("127.0.0.1", 3636, true,
+                          "cn=reader,ou=Service,dc=example,dc=com", "reader",
+                          &e);
+  check(rc == LS_TLS_UNTRUSTED,
+        "SSH: the certificate is checked against the real host name");
+  ls_error_dispose(&e);
+  ls_set_tls_trust(NULL, true);
+  free(issuing);
 }
 
 int main(int argc, char **argv) {
@@ -205,6 +254,8 @@ int main(int argc, char **argv) {
   check(open_conn(&later) == LS_OK && count_people(later) == 76000,
         "SSH: the next connection after the idle tunnel retired works first time");
   ls_connection_close(later);
+
+  tls_through_tunnel();
   ls_shutdown(3000);
   printf(failures ? "SSH CHECKS FAILED\n" : "SSH CHECKS PASSED\n");
   return failures ? 1 : 0;

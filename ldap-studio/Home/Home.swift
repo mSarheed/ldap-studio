@@ -98,6 +98,8 @@ struct Home: View {
                 baseDN: item.baseDN,
                 bindDN: item.bindDN,
                 trustedCertSHA256: item.trustedCertSHA256,
+                trustedCACertificates: item.trustedCACertificates,
+                checksCertificateHostName: item.checksCertificateHostName,
                 bookmarks: item.bookmarks,
                 savedFilters: item.savedFilters,
                 isFavorite: item.isFavorite,

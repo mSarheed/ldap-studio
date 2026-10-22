@@ -32,6 +32,9 @@ struct BrowserView: View {
     /// Bumped to make the detail view re-read the selected entry.
     @State private var detailReloadToken = 0
     @State private var isShowingCertTrust = false
+    /// The load failed over the server's certificate, so the error screen
+    /// offers to look at it again after the trust sheet was cancelled.
+    @State private var canReviewCertificate = false
     /// An SSH host key seen for the first time, waiting on the user's say-so.
     @State private var pendingSSHHostKey: PendingSSHHostKey?
 
@@ -84,8 +87,15 @@ struct BrowserView: View {
                 } description: {
                     Text(loadError)
                 } actions: {
-                    Button("Try Again") {
-                        retry()
+                    HStack {
+                        if canReviewCertificate {
+                            Button("Review Certificate…") {
+                                isShowingCertTrust = true
+                            }
+                        }
+                        Button("Try Again") {
+                            retry()
+                        }
                     }
                 }
             } else {
@@ -133,6 +143,7 @@ struct BrowserView: View {
             operations.schema = nil
             loadError = nil
             isShowingCertTrust = false
+            canReviewCertificate = false
             pendingSSHHostKey = nil
             Task { await reload(selecting: selection) }
         }
@@ -143,19 +154,19 @@ struct BrowserView: View {
             operations.connection = connection
         }
         .sheet(isPresented: $isShowingCertTrust) {
-            CertificateTrustSheet(
-                host: connection.host,
-                port: UInt16(clamping: connection.port),
-                useSSL: connection.useSSL,
-                useStartTLS: connection.useStartTLS
-            ) { sha256 in
+            CertificateTrustSheet(connection: connection) { decision in
                 var updated = connection
-                updated.trustedCertSHA256 = sha256
+                updated.trust(decision)
+                // Nothing new to trust (another server answered the probe,
+                // say), so nothing to reconnect with: just try again.
+                guard updated != connection else { return retry() }
                 // Reconnects through onChange(of: connectSettings) — retrying
-                // right here would still see the connection without the pin.
+                // right here would still see the connection without the trust.
                 if !store.update(updated) {
                     loadError = "This connection has been deleted, so the certificate couldn't be trusted."
                 }
+            } onRetry: {
+                retry()
             }
         }
         .alert(
@@ -233,6 +244,7 @@ struct BrowserView: View {
 
     private func retry() {
         loadError = nil
+        canReviewCertificate = false
         Task {
             await loadDirectory()
         }
@@ -308,32 +320,14 @@ struct BrowserView: View {
             loadError = "\(error)"
             return
         }
-        if case let .TLSUntrusted(host, port, _) = error, connection.trustedCertSHA256 == nil {
-            // An untrusted certificate isn't a dead end — offer to inspect
-            // and pin it. The error underneath is what's left if the user
-            // cancels. Anything already pinned that still fails is a real
-            // problem, so that's shown plainly below.
-            loadError = "The certificate for \(host):\(port) isn't trusted, so no connection was made."
+        if case .TLSUntrusted = error {
+            // An untrusted certificate isn't a dead end, whether it's a first
+            // sighting or one that replaced a certificate trusted before —
+            // the sheet shows it and what trusting it would take, right here.
+            // The error underneath is what's left if the user cancels.
+            loadError = "\(error). No connection was made."
+            canReviewCertificate = true
             isShowingCertTrust = true
-        } else if case let .TLSUntrusted(host, port, _) = error {
-            // With a pin set the core only reports TLSUntrusted when the
-            // fingerprint doesn't match. Like a changed SSH host key, that
-            // is never a one-click decision — but say where to go, since
-            // the fix lives in another window. Over an SSH tunnel nothing
-            // but the pin checks the certificate (it can't match the host
-            // name of the local forward), so say what clearing it gives up.
-            let afterClearing = connection.useSSHTunnel
-                ? "This window will then reconnect, but through the SSH tunnel the certificate can't be checked against the host name, so it will accept whatever certificate the server presents."
-                : "This window will then reconnect, and if the system doesn't trust the new certificate, it will show it to you to check first."
-            loadError = """
-                The certificate for \(host):\(port) no longer matches the one you trusted.
-
-                This usually means the certificate was renewed, or that the host name points at \
-                several servers (an Active Directory domain name, for example) and a different one \
-                answered. It can also mean someone is intercepting the connection. If you know the \
-                change is legitimate, clear the trusted certificate under Edit Connection › Network \
-                and save. \(afterClearing)
-                """
         } else if case let .SSHHostKeyUntrusted(host, port, fingerprint) = error {
             if connection.sshHostKeySHA256 == nil {
                 pendingSSHHostKey = PendingSSHHostKey(host: host, port: port, fingerprint: fingerprint)

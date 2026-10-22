@@ -44,10 +44,20 @@ struct SavedConnection: Identifiable, Codable, Hashable {
     var useStartTLS: Bool
     var baseDN: String
     var bindDN: String
-    /// SHA-256 (lowercase hex) of a server leaf certificate the user chose
+    /// SHA-256 (lowercase hex) of the one server certificate the user chose
     /// to trust for this connection, when it wouldn't validate against the
-    /// system trust store. `nil` = normal chain verification.
+    /// system trust store — for a self-signed server, or one that doesn't
+    /// send the certificate authority that issued its certificate.
     var trustedCertSHA256: String?
+    /// Certificate authorities (DER) the user chose to trust for this
+    /// connection: any server whose certificate they issued is accepted, so
+    /// a host name that leads to several servers (an Active Directory
+    /// domain name) and renewed certificates keep working. Either this or
+    /// `trustedCertSHA256` accepting a certificate is enough.
+    var trustedCACertificates: [Data]
+    /// Off accepts a certificate issued to another host name — for servers
+    /// whose certificates don't name the host this connection uses.
+    var checksCertificateHostName: Bool
     /// DNs the user pinned for quick jumping, newest first.
     var bookmarks: [String]
     /// Named/pinned filters and the recent Advanced Search history for this
@@ -80,7 +90,8 @@ struct SavedConnection: Identifiable, Codable, Hashable {
 
     init(id: UUID = UUID(), name: String, host: String, port: Int, useSSL: Bool,
          useStartTLS: Bool = false, baseDN: String, bindDN: String,
-         trustedCertSHA256: String? = nil, bookmarks: [String] = [],
+         trustedCertSHA256: String? = nil, trustedCACertificates: [Data] = [],
+         checksCertificateHostName: Bool = true, bookmarks: [String] = [],
          savedFilters: [SavedLDAPFilter] = [],
          isFavorite: Bool = false, isReadOnly: Bool = false, allowsMCP: Bool = false,
          chaseReferrals: Bool = false, timeoutSeconds: Int = 15,
@@ -99,6 +110,8 @@ struct SavedConnection: Identifiable, Codable, Hashable {
         self.baseDN = baseDN
         self.bindDN = bindDN
         self.trustedCertSHA256 = trustedCertSHA256
+        self.trustedCACertificates = trustedCACertificates
+        self.checksCertificateHostName = checksCertificateHostName
         self.bookmarks = bookmarks
         self.savedFilters = savedFilters
         self.isFavorite = isFavorite
@@ -122,6 +135,7 @@ struct SavedConnection: Identifiable, Codable, Hashable {
 
     enum CodingKeys: String, CodingKey {
         case id, name, host, port, useSSL, useStartTLS, baseDN, bindDN, trustedCertSHA256, bookmarks, savedFilters, isFavorite, isReadOnly, allowsMCP
+        case trustedCACertificates, checksCertificateHostName
         case chaseReferrals, timeoutSeconds, authentication, saslAuthID, saslRealm
         case clientCertificateBookmark, clientKeyBookmark
         case useSSHTunnel, sshHost, sshPort, sshUsername, sshAuthentication, sshPrivateKeyBookmark, sshHostKeySHA256
@@ -142,6 +156,8 @@ struct SavedConnection: Identifiable, Codable, Hashable {
         baseDN = try container.decodeIfPresent(String.self, forKey: .baseDN) ?? ""
         bindDN = try container.decode(String.self, forKey: .bindDN)
         trustedCertSHA256 = try container.decodeIfPresent(String.self, forKey: .trustedCertSHA256)
+        trustedCACertificates = try container.decodeIfPresent([Data].self, forKey: .trustedCACertificates) ?? []
+        checksCertificateHostName = try container.decodeIfPresent(Bool.self, forKey: .checksCertificateHostName) ?? true
         bookmarks = try container.decodeIfPresent([String].self, forKey: .bookmarks) ?? []
         savedFilters = try container.decodeIfPresent([SavedLDAPFilter].self, forKey: .savedFilters) ?? []
         isFavorite = try container.decodeIfPresent(Bool.self, forKey: .isFavorite) ?? false
@@ -174,6 +190,8 @@ struct SavedConnection: Identifiable, Codable, Hashable {
         try container.encode(baseDN, forKey: .baseDN)
         try container.encode(bindDN, forKey: .bindDN)
         try container.encodeIfPresent(trustedCertSHA256, forKey: .trustedCertSHA256)
+        if !trustedCACertificates.isEmpty { try container.encode(trustedCACertificates, forKey: .trustedCACertificates) }
+        if !checksCertificateHostName { try container.encode(false, forKey: .checksCertificateHostName) }
         if !bookmarks.isEmpty { try container.encode(bookmarks, forKey: .bookmarks) }
         if !savedFilters.isEmpty { try container.encode(savedFilters, forKey: .savedFilters) }
         if isFavorite { try container.encode(true, forKey: .isFavorite) }
@@ -221,7 +239,9 @@ extension SavedConnection {
             // Keychain for a password that only matters through a tunnel.
             sshPassword: useSSHTunnel ? (KeychainService.readSSHPassword(for: id) ?? "") : "",
             sshPrivateKeyBookmark: sshPrivateKeyBookmark,
-            sshHostKeySHA256: sshHostKeySHA256
+            sshHostKeySHA256: sshHostKeySHA256,
+            trustedCACertificates: trustedCACertificates,
+            checksCertificateHostName: checksCertificateHostName
         )
     }
 }

@@ -110,6 +110,8 @@ struct NewConnectionSheet: View {
     @State private var timeoutSeconds: Int
     /// Kept from the existing connection unless the user clears it here.
     @State private var trustedCertSHA256: String?
+    @State private var trustedCACertificates: [Data]
+    @State private var checksCertificateHostName: Bool
 
     // SSH tunnel
     @State private var useSSHTunnel: Bool
@@ -127,6 +129,12 @@ struct NewConnectionSheet: View {
     @State private var testResultMessage = ""
     @State private var isShowingTestResult = false
     @State private var isTesting = false
+    /// The connection as a test just found its certificate refused, for
+    /// the sheet that asks what to trust.
+    @State private var connectionToTrust: SavedConnection?
+    /// The options that test connected with — `ldapOptions` but with the
+    /// SSH password from the field.
+    @State private var optionsToTrust: LDAPConnectionOptions?
 
     init(existingConnection: SavedConnection? = nil) {
         self.existingConnection = existingConnection
@@ -160,6 +168,8 @@ struct NewConnectionSheet: View {
         _chaseReferrals = State(initialValue: existingConnection?.chaseReferrals ?? false)
         _timeoutSeconds = State(initialValue: existingConnection?.timeoutSeconds ?? 15)
         _trustedCertSHA256 = State(initialValue: existingConnection?.trustedCertSHA256)
+        _trustedCACertificates = State(initialValue: existingConnection?.trustedCACertificates ?? [])
+        _checksCertificateHostName = State(initialValue: existingConnection?.checksCertificateHostName ?? true)
 
         _useSSHTunnel = State(initialValue: existingConnection?.useSSHTunnel ?? false)
         _sshHost = State(initialValue: existingConnection?.sshHost ?? "")
@@ -181,6 +191,14 @@ struct NewConnectionSheet: View {
     /// can point anywhere) can't be combined with it.
     private var hasIncompatibleTunnelOptions: Bool {
         useSSHTunnel && (chaseReferrals || authentication == .gssapi)
+    }
+
+    /// Whether the core, not libldap, checks this connection's certificate
+    /// — so libldap mustn't follow referrals on connections of its own
+    /// that nothing would check (see connect.c).
+    private var referralsGoUnchecked: Bool {
+        encryption != .none
+            && (trustedCertSHA256 != nil || !trustedCACertificates.isEmpty || !checksCertificateHostName)
     }
 
     private var isValid: Bool {
@@ -206,6 +224,8 @@ struct NewConnectionSheet: View {
             baseDN: baseDN,
             bindDN: bindDN,
             trustedCertSHA256: trustedCertSHA256,
+            trustedCACertificates: trustedCACertificates,
+            checksCertificateHostName: checksCertificateHostName,
             bookmarks: existingConnection?.bookmarks ?? [],
             savedFilters: existingConnection?.savedFilters ?? [],
             isFavorite: existingConnection?.isFavorite ?? false,
@@ -269,6 +289,19 @@ struct NewConnectionSheet: View {
             }
         } message: {
             Text("Verify this fingerprint with the server administrator (or `ssh-keygen -lf` on its host key) before trusting it:\n\n\(SSHHostKeyFingerprint.openSSH(fromHex: pendingSSHHostKey ?? ""))")
+        }
+        .sheet(item: $connectionToTrust) { refused in
+            CertificateTrustSheet(connection: refused, options: optionsToTrust) { decision in
+                // Onto the fields as they are now, then test with it.
+                var trusted = builtConnection
+                trusted.trust(decision)
+                trustedCertSHA256 = trusted.trustedCertSHA256
+                trustedCACertificates = trusted.trustedCACertificates
+                checksCertificateHostName = trusted.checksCertificateHostName
+                test()
+            } onRetry: {
+                test()
+            }
         }
     }
 
@@ -390,6 +423,14 @@ struct NewConnectionSheet: View {
         card("Connection Behavior", "network") {
             Toggle("Chase LDAP referrals", isOn: $chaseReferrals)
             hint("Allows the directory to redirect searches to another LDAP server.")
+            if chaseReferrals && referralsGoUnchecked {
+                Label(
+                    "Referrals aren't followed while this connection trusts a certificate or certificate authority of its own, or skips the host-name check: the servers they lead to couldn't be checked the same way.",
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .font(.caption)
+                .foregroundStyle(.orange)
+            }
             LabeledContent("Operation timeout") {
                 HStack(spacing: 6) {
                     IntegerField("Seconds", value: $timeoutSeconds)
@@ -400,6 +441,30 @@ struct NewConnectionSheet: View {
                     Stepper("", value: $timeoutSeconds, in: Self.validTimeouts)
                         .labelsHidden()
                 }
+            }
+            if encryption != .none {
+                Toggle("Check that the certificate matches the host name", isOn: $checksCertificateHostName)
+                if !checksCertificateHostName {
+                    hint("A certificate from a trusted certificate authority is accepted whatever name it was issued to.")
+                }
+            }
+            if !trustedCACertificates.isEmpty {
+                LabeledContent("Trusted certificate authorities") {
+                    VStack(alignment: .trailing, spacing: 6) {
+                        ForEach(trustedCACertificates.map(PresentedCertificate.init)) { authority in
+                            HStack {
+                                Text(authority.name)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                    .help("SHA-256 \(Self.shortFingerprint(authority.sha256))")
+                                Button("Remove") {
+                                    trustedCACertificates.removeAll { $0 == authority.der }
+                                }
+                            }
+                        }
+                    }
+                }
+                hint("Any server whose certificate these issued is accepted, so renewed certificates and every server behind the host name keep working.")
             }
             if let fingerprint = trustedCertSHA256 {
                 LabeledContent("Trusted certificate") {
@@ -518,6 +583,20 @@ struct NewConnectionSheet: View {
         if let existingConnection, allowsMCP == existingConnection.allowsMCP {
             connection.allowsMCP = store.latest(existingConnection).allowsMCP
         }
+        // Same for what a browser window trusted meanwhile, when the server
+        // asked it: saving an unrelated edit mustn't make it ask again.
+        if let existingConnection {
+            let latest = store.latest(existingConnection)
+            if trustedCertSHA256 == existingConnection.trustedCertSHA256 {
+                connection.trustedCertSHA256 = latest.trustedCertSHA256
+            }
+            if trustedCACertificates == existingConnection.trustedCACertificates {
+                connection.trustedCACertificates = latest.trustedCACertificates
+            }
+            if checksCertificateHostName == existingConnection.checksCertificateHostName {
+                connection.checksCertificateHostName = latest.checksCertificateHostName
+            }
+        }
         KeychainService.savePassword(password, for: connection.id)
         KeychainService.saveSSHPassword(sshPassword, for: connection.id)
         if existingConnection == nil {
@@ -533,18 +612,18 @@ struct NewConnectionSheet: View {
         Task {
             isTesting = true
             defer { isTesting = false }
+            // The SSH password lives in the field until Save writes it to
+            // the Keychain, so `ldapOptions` (which reads the Keychain)
+            // would hand back a stale one.
+            var options = connection.ldapOptions
+            options.sshPassword = sshPassword
             do {
-                // The SSH password lives in the field until Save writes it to
-                // the Keychain, so `ldapOptions` (which reads the Keychain)
-                // would hand back a stale one.
-                var options = connection.ldapOptions
-                options.sshPassword = sshPassword
                 try await testConnection(
                     host: host,
                     port: UInt16(clamping: port),
                     useSsl: encryption == .ldaps,
                     startTLS: encryption == .startTLS,
-                    pinnedCertSHA256: trustedCertSHA256,
+                    pinnedCertSHA256: connection.trustedCertSHA256,
                     options: options,
                     bindDn: bindDN,
                     password: password
@@ -566,21 +645,12 @@ struct NewConnectionSheet: View {
                     This can mean the server was rebuilt, or that someone is intercepting the connection. \
                     If you know the change is legitimate, clear the trusted host key above and test again.
                     """
-            } catch ConnectionError.TLSUntrusted where trustedCertSHA256 != nil {
-                // Pinned and no longer matching — see BrowserView.showLoadFailure.
-                testSucceeded = false
-                let afterClearing = useSSHTunnel
-                    ? "Through the SSH tunnel the certificate can't be checked against the host name, so after that this connection will accept whatever certificate the server presents."
-                    : "When you next open the connection, you'll be asked to check the new certificate if the system doesn't trust it."
-                testResultMessage = """
-                    The server's certificate no longer matches the one you trusted.
-
-                    This usually means the certificate was renewed, or that the host name points at \
-                    several servers (an Active Directory domain name, for example) and a different one \
-                    answered. It can also mean someone is intercepting the connection. If you know the \
-                    change is legitimate, clear the trusted certificate on the Network page and save. \
-                    \(afterClearing)
-                    """
+            } catch ConnectionError.TLSUntrusted {
+                // Show the certificate and what trusting it would take —
+                // see BrowserView.showLoadFailure.
+                optionsToTrust = options
+                connectionToTrust = connection
+                return
             } catch {
                 testSucceeded = false
                 testResultMessage = "\(error)"
