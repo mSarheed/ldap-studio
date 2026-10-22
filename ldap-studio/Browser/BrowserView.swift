@@ -18,6 +18,7 @@ struct BrowserView: View {
         self.connection = connection
         _tree = State(initialValue: DirectoryTree(connection: connection))
         _operations = State(initialValue: BranchOperations(connection: connection))
+        _searchOperations = State(initialValue: BranchOperations(connection: connection))
     }
 
     /// The lazily loaded directory tree — see DirectoryTree.swift.
@@ -50,6 +51,18 @@ struct BrowserView: View {
     /// server doesn't expose a usable schema), autocomplete just has no
     /// suggestions rather than the whole browser failing to open.
     @State private var schema: LdapSchema?
+    /// The search last opened as a table, kept while an entry is shown so
+    /// its results are one click away.
+    @State private var searchSession: SearchSession?
+    @State private var isShowingSearch = false
+    /// Set while `apply` moves or clears the selection itself (an entry
+    /// was moved or deleted), which isn't the user opening an entry.
+    @State private var selectionChangeKeepsSearch: String??
+    /// Export / move / delete of search results. Shown over the whole
+    /// window, like `operations`, so a delete keeps its progress and Cancel
+    /// when an entry is opened meanwhile — but it leaves the selection
+    /// alone, where `operations` selects what it moved.
+    @State private var searchOperations: BranchOperations
 
     private var endpoint: String { connection.endpoint }
 
@@ -59,9 +72,14 @@ struct BrowserView: View {
             OperationLogStrip(endpoint: endpoint)
         }
         .branchOperations(operations)
-        .onDisappear { tree.cancelAll() }
+        .branchOperations(searchOperations)
+        .onDisappear {
+            tree.cancelAll()
+            searchSession?.stop()
+        }
         .onAppear {
             operations.onChange = { change in await apply(change) }
+            searchOperations.onChange = { change in await apply(change) }
             operations.onSelect = { dn in
                 Task {
                     _ = try? await tree.reveal(dn)
@@ -141,17 +159,31 @@ struct BrowserView: View {
             tree = DirectoryTree(connection: connection)
             schema = nil
             operations.schema = nil
+            searchOperations.schema = nil
+            searchSession?.stop()
+            searchSession = nil
+            isShowingSearch = false
             loadError = nil
             isShowingCertTrust = false
             canReviewCertificate = false
             pendingSSHHostKey = nil
             Task { await reload(selecting: selection) }
         }
+        .onChange(of: selection) { _, newValue in
+            if let kept = selectionChangeKeepsSearch {
+                selectionChangeKeepsSearch = nil
+                if kept == newValue { return }
+            }
+            // An entry picked in the tree or the search field is shown in
+            // place of the table.
+            isShowingSearch = false
+        }
         .onChange(of: connection) {
             // Every edit, connect settings or not — branch operations check
             // `isReadOnly`, for one.
             tree.connection = connection
             operations.connection = connection
+            searchOperations.connection = connection
         }
         .sheet(isPresented: $isShowingCertTrust) {
             CertificateTrustSheet(connection: connection) { decision in
@@ -209,7 +241,10 @@ struct BrowserView: View {
             schema: schema,
             bookmarks: connection.bookmarks,
             onToggleBookmark: toggleBookmark,
-            onUpdateSavedFilters: updateSavedFilters,
+            onEditSavedSearches: editSavedSearches,
+            onOpenSearch: openSearch,
+            isShowingSearchResults: isShowingSearch && searchSession != nil,
+            onShowEntry: { isShowingSearch = false },
             operations: operations,
             onChange: { change in await apply(change) },
             onRefreshDetail: { detailReloadToken += 1 }
@@ -219,6 +254,60 @@ struct BrowserView: View {
 
     @ViewBuilder
     private var detail: some View {
+        if isShowingSearch, let searchSession, tree.root != nil {
+            SearchResultsView(
+                session: searchSession,
+                connection: connection,
+                tree: tree,
+                schema: schema,
+                selectedDN: selection,
+                operations: searchOperations,
+                onOpen: { dn in openFromSearch(dn) },
+                onClose: { isShowingSearch = false },
+                onEditSavedSearches: editSavedSearches
+            )
+            .id(ObjectIdentifier(searchSession))
+        } else {
+            VStack(spacing: 0) {
+                if let searchSession, tree.root != nil {
+                    backToResultsBar(searchSession)
+                }
+                entryDetail
+            }
+        }
+    }
+
+    private func backToResultsBar(_ session: SearchSession) -> some View {
+        HStack(spacing: 8) {
+            Button {
+                isShowingSearch = true
+            } label: {
+                Label("Back to Search Results", systemImage: "chevron.left")
+            }
+            .buttonStyle(.borderless)
+            Text(session.query.summary)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer()
+            Button {
+                session.stop()
+                searchSession = nil
+            } label: {
+                Image(systemName: "xmark")
+            }
+            .buttonStyle(.borderless)
+            .help("Close the Search")
+        }
+        .font(.callout)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(.bar)
+        .overlay(alignment: .bottom) { Divider() }
+    }
+
+    @ViewBuilder
+    private var entryDetail: some View {
         // Not while (re)connecting: a selection kept across a settings
         // change may not exist on the server being connected to.
         if let selection, tree.root != nil {
@@ -239,6 +328,29 @@ struct BrowserView: View {
                 systemImage: "sidebar.left",
                 description: Text("Select an entry from the tree to view its attributes.")
             )
+        }
+    }
+
+    /// Opens `query` as a table in the detail view, running it straight
+    /// away unless it's blank (which would list the whole directory).
+    private func openSearch(_ query: SearchQuery) {
+        searchSession?.stop()
+        let session = SearchSession(query: query, directoryBaseDN: tree.baseDN)
+        searchSession = session
+        isShowingSearch = true
+        if query != SearchQuery(baseDN: query.baseDN),
+           let filter = session.run(target: connection.ldapTarget, schema: schema) {
+            editSavedSearches { SavedSearches.recording(query, filter: filter, in: $0) }
+        }
+    }
+
+    /// Shows a result: in the tree, and its attributes in place of the
+    /// table — which stays a click away.
+    private func openFromSearch(_ dn: String) {
+        isShowingSearch = false
+        Task {
+            let found = try? await tree.reveal(dn)
+            selection = found ?? tree.node(dn)?.dn ?? dn
         }
     }
 
@@ -274,9 +386,11 @@ struct BrowserView: View {
         store.update(updated)
     }
 
-    private func updateSavedFilters(_ filters: [SavedLDAPFilter]) {
-        var updated = connection
-        updated.savedFilters = filters
+    /// Changes this connection's saved and recent searches, starting from
+    /// the store's current list rather than one a view may have kept.
+    private func editSavedSearches(_ edit: ([SavedLDAPFilter]) -> [SavedLDAPFilter]) {
+        var updated = store.latest(connection)
+        updated.savedFilters = edit(updated.savedFilters)
         store.update(updated)
     }
 
@@ -310,6 +424,7 @@ struct BrowserView: View {
         guard generation == loadGeneration else { return }
         schema = loadedSchema
         operations.schema = loadedSchema
+        searchOperations.schema = loadedSchema
         loadError = nil
     }
 
@@ -353,18 +468,19 @@ struct BrowserView: View {
     /// Brings the tree and the detail view up to date after a write,
     /// touching only the entries it affected.
     private func apply(_ change: DirectoryChange) async {
+        await searchSession?.apply(change)
         switch change {
         case let .added(dn):
             await tree.entryAdded(dn)
         case let .removed(dn):
             tree.entryRemoved(dn)
-            if let selected = selection, DN.isWithin(selected, dn) { selection = nil }
+            if let selected = selection, DN.isWithin(selected, dn) { reconcileSelection(nil) }
         case let .moved(from, to):
             await tree.entryMoved(from: from, to: to)
             if let selected = selection, DN.isWithin(selected, from) {
                 let moved = DN.rebase(selected, from: from, to: to)
                 // The server's spelling, so it matches the tree row's tag.
-                selection = tree.node(moved)?.dn ?? moved
+                reconcileSelection(tree.node(moved)?.dn ?? moved)
             }
         case let .modified(dn):
             await tree.entryModified(dn)
@@ -373,6 +489,14 @@ struct BrowserView: View {
             await tree.branchChanged(dn)
             if let selected = selection, DN.isWithin(selected, dn) { detailReloadToken += 1 }
         }
+    }
+
+    /// Follows the selected entry through a move or delete, leaving the
+    /// search results up if they're showing.
+    private func reconcileSelection(_ dn: String?) {
+        guard dn != selection else { return }
+        if isShowingSearch { selectionChangeKeepsSearch = .some(dn) }
+        selection = dn
     }
 
     /// Reconnects, keeping `dn` selected if the new tree can reach it.

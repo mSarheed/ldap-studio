@@ -337,6 +337,64 @@ func connection(_ bind: String, _ pw: String, base: String = "dc=example,dc=com"
     await small.loadRoot()
     if let r = small.root { await small.retryWait(r) }
     check(small.root?.children.count == 4, "small directory opens (\(ms(clock.now - t0))): \(small.root?.children.map(\.name) ?? [])")
+    // search: filters built from the search field, chips and conditions
+    let schema = try? await fetchSchema(reader.ldapTarget)
+    check(schema != nil, "search: schema read")
+    check(EntryKind.people.filter(schema: schema)?.contains("computer") == false,
+          "search: People leaves out the computer class OpenLDAP doesn't have")
+    func count(_ query: SearchQuery) async -> Int? {
+        guard let filter = query.filter(schema: schema) else { return nil }
+        let result = try? await searchAll(reader.ldapTarget, LdapSearchRequest(
+            baseDn: query.baseDN ?? "dc=example,dc=com", scope: query.depth.scope,
+            filter: filter, attributes: ["1.1"]))
+        return result?.entries.count
+    }
+    check(await count(SearchQuery(text: "user07599", kind: .people)) == 10, "search: People named user07599*")
+    check(await count(SearchQuery(text: "user07599", kind: .groups)) == 0, "search: no Groups named user07599*")
+    check(await count(SearchQuery(text: "group000", kind: .groups)) == 10, "search: Groups named group000*")
+    check(await count(SearchQuery(text: "ws0000", kind: .computers)) == 10, "search: Computers named ws0000*")
+    check(await count(SearchQuery(text: "Level0", kind: .containers)) == 9, "search: OUs named Level0*")
+    check(await count(SearchQuery(text: "uid:user07599")) == 10, "search: uid:user07599 looks at uid only")
+    check(await count(SearchQuery(text: "user*99", kind: .people,
+                                  baseDN: "ou=People,dc=example,dc=com", depth: .oneLevel)) == 760,
+          "search: wildcard in the middle, one level under People")
+    var conditions = SearchQuery(kind: .people, baseDN: "ou=People,dc=example,dc=com")
+    conditions.conditions = [LDAPFilterClause(attribute: "uid", operation: .beginsWith, value: "user0000"),
+                             LDAPFilterClause(attribute: "uid", operation: .equals, value: "user000001", isNegated: true)]
+    check(await count(conditions) == 99, "search: AND of conditions, one negated")
+    conditions.join = .or
+    check(await count(conditions) == 76_000, "search: OR of the same conditions")
+    check(await count(SearchQuery(rawFilter: "uid=user000001")) == 1, "search: hand-typed filter without parentheses")
+
+    // filter parser
+    check((try? LDAPFilterParser.parse("(&(uid=a*)(!(cn=b))(|(mail=*x*)(sn>=c)))")) != nil, "parser: nested filter")
+    check((try? LDAPFilterParser.parse("(member:1.2.840.113556.1.4.1941:=cn=x)")) != nil, "parser: extensible match")
+    for good in ["(cn:dn:2.5.13.5:=a)", "(:caseExactMatch:=a)", "(:dn:2.5.13.5:=a)", "(cn;lang-en=a)", "(2.5.4.3=a)"] {
+        check((try? LDAPFilterParser.parse(good)) != nil, "parser accepts \(good)")
+    }
+    for bad in ["(uid=a", "(uid=a))", "(=a)", "(uid~a)", "(uid>=a*)", "(cn=a(b)", "(cn=\\4)", "(&(uid=a)x)",
+                "(1abc=foo)", "(cn:bogus:extra:=foo)", "(:dn:=foo)", "(cn;=a)", "(cn:=)x"] {
+        check((try? LDAPFilterParser.parse(bad)) == nil, "parser rejects \(bad)")
+    }
+    if let parsed = LDAPFilterParser.conditions(from: "(|(mail=*@cbpf.br)(!(uid=a\\2ab))(cn=*mid*)(sn=*))") {
+        check(parsed.join == .or && parsed.clauses.map(\.operation) == [.endsWith, .equals, .contains, .present]
+              && parsed.clauses[1].isNegated && parsed.clauses[1].value == "a*b",
+              "parser: OR of comparisons becomes conditions, escapes undone")
+        let rebuilt = SearchQuery(conditions: parsed.clauses, join: parsed.join).filter(schema: nil)
+        check(rebuilt == "(|(mail=*@cbpf.br)(!(uid=a\\2ab))(cn=*mid*)(sn=*))", "parser: conditions rebuild the same filter")
+    } else {
+        check(false, "parser: OR of comparisons becomes conditions")
+    }
+    check(LDAPFilterParser.conditions(from: "(&(uid=a)(|(cn=b)(cn=c)))") == nil, "parser: nested filter isn't shown as conditions")
+    check(LDAPFilterParser.conditions(from: "(description=)") == nil, "parser: an empty value isn't shown as a condition")
+    let saved = SavedSearches.pinning(SearchQuery(rawFilter: "(cn=a)", baseDN: "ou=A"), filter: "(cn=a)",
+                                      name: "In A", in: [])
+    let afterB = SavedSearches.recording(SearchQuery(rawFilter: "(cn=a)", baseDN: "ou=B"), filter: "(cn=a)", in: saved)
+    check(afterB.count == 2 && afterB.first { $0.isPinned }?.query?.baseDN == "ou=A",
+          "saved searches: the same filter in another branch doesn't overwrite a saved one")
+    check(SearchQuery.value("ana.duarte@cbpf.br", matches: "ana") && !SearchQuery.value("Juliana", matches: "ana")
+          && SearchQuery.value("user0599", matches: "user*99"), "search: matched-attribute check follows the server")
+
     print(failures == 0 ? "ALL PASSED" : "\(failures) FAILED")
 }
 

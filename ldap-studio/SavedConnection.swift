@@ -30,6 +30,36 @@ struct SavedLDAPFilter: Identifiable, Codable, Hashable {
     var filter: String
     var isPinned: Bool = false
     var lastUsed: Date = .now
+    /// The search it was made from, so it reopens as one rather than as a
+    /// bare filter. Nil for filters saved before searches were.
+    var query: SearchQuery?
+
+    init(id: UUID = UUID(), name: String? = nil, filter: String, isPinned: Bool = false,
+         lastUsed: Date = .now, query: SearchQuery? = nil) {
+        self.id = id
+        self.name = name
+        self.filter = filter
+        self.isPinned = isPinned
+        self.lastUsed = lastUsed
+        self.query = query
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, filter, isPinned, lastUsed, query
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decodeIfPresent(String.self, forKey: .name)
+        filter = try container.decode(String.self, forKey: .filter)
+        isPinned = try container.decode(Bool.self, forKey: .isPinned)
+        lastUsed = try container.decode(Date.self, forKey: .lastUsed)
+        // A query this version can't read (written by a later one) only
+        // loses the query: the filter still reopens the search, and the
+        // connection around it still loads.
+        query = (try? container.decodeIfPresent(SearchQuery.self, forKey: .query)) ?? nil
+    }
 }
 
 struct SavedConnection: Identifiable, Codable, Hashable {

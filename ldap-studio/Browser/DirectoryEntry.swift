@@ -136,6 +136,9 @@ extension DirectoryEntry {
         if has("alias") { return "arrowshape.turn.up.right.fill" }
         if has("referral") { return "arrow.up.forward.square.fill" }
 
+        // An Active Directory computer is also a person and a user.
+        if has("computer") { return "desktopcomputer" }
+
         // People
         if has("inetorgperson", "organizationalperson", "person", "residentialperson",
                "posixaccount", "shadowaccount", "account", "inetuser", "user",

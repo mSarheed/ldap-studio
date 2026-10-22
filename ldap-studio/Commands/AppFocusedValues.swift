@@ -34,6 +34,9 @@ struct DirectoryCommands {
     var openSchema: () -> Void
     var openLDIFEditor: () -> Void
     var openServerInfo: () -> Void
+    /// Puts the cursor in the sidebar's search field.
+    var find: () -> Void
+    /// Opens a search as a table, to search with conditions.
     var advancedSearch: () -> Void
     /// Opens the "Go to DN" quick-jump.
     var goToDN: () -> Void
@@ -66,6 +69,26 @@ struct DirectoryCommands {
     var deleteSelected: (() -> Void)?
     /// Non-nil only when the selected entry is a group.
     var editMembers: (() -> Void)?
+
+    /// These commands with none that act on the selected entry — while the
+    /// detail view shows search results, not the entry the tree selected.
+    var withoutSelection: DirectoryCommands {
+        var commands = self
+        commands.toggleBookmark = nil
+        commands.isSelectedBookmarked = false
+        commands.editEntry = nil
+        commands.refreshSelected = nil
+        commands.renameSelected = nil
+        commands.copyDN = nil
+        commands.copySelectedLDIF = nil
+        commands.exportSelected = nil
+        commands.setPassword = nil
+        commands.setPhoto = nil
+        commands.testBind = nil
+        commands.deleteSelected = nil
+        commands.editMembers = nil
+        return commands
+    }
 }
 
 struct LDIFEditorCommands {

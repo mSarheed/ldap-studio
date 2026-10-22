@@ -36,6 +36,7 @@ build() {
         ldap-studio/Core/SSHHostKeyFingerprint.swift ldap-studio/Core/CertificateTrust.swift ldap-studio/SavedConnection.swift \
         ldap-studio/Browser/DirectoryEntry.swift ldap-studio/Browser/DirectoryTree.swift \
         ldap-studio/Browser/EntryActions.swift ldap-studio/Browser/LDIFParser.swift \
+        ldap-studio/Browser/Search/SearchQuery.swift ldap-studio/Browser/Search/LDAPFilterParser.swift \
         scripts/test-server/checks/KeychainStub.swift "$@" \
         core/build/libldapstudio.a \
         -L"$B/openldap/lib" -L"$B/openssl@4/lib" -L"$B/libxcrypt/lib" -L"$B/libssh2/lib" \

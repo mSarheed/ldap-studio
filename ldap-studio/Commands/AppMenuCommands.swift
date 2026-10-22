@@ -145,7 +145,13 @@ struct AppMenuCommands: Commands {
             .keyboardShortcut("r", modifiers: [.command, .shift])
             .disabled(ldifEditorCommands == nil || ldifEditorCommands?.isReadOnly == true)
 
-            Button("Advanced Search…") {
+            Button("Find…") {
+                directoryCommands?.find()
+            }
+            .keyboardShortcut("f", modifiers: .command)
+            .disabled(directoryCommands == nil)
+
+            Button("Search with Conditions…") {
                 directoryCommands?.advancedSearch()
             }
             .keyboardShortcut("f", modifiers: [.command, .shift])
