@@ -8,6 +8,9 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct ConnectionListPanel: View {
+    var onNewConnection: () -> Void
+    var onImport: () -> Void
+
     @Environment(ConnectionStore.self) private var store
     @Environment(\.openWindow) private var openWindow
 
@@ -21,15 +24,11 @@ struct ConnectionListPanel: View {
     @State private var isShowingExportChoice = false
 
     private var filteredConnections: [SavedConnection] {
-        let matches = searchText.isEmpty
-            ? store.connections
-            : store.connections.filter {
-                $0.name.localizedCaseInsensitiveContains(searchText)
-                    || $0.host.localizedCaseInsensitiveContains(searchText)
-            }
-        // Favorites float to the top; `sorted` is stable so the rest keep
-        // their existing order.
-        return matches.sorted { $0.isFavorite && !$1.isFavorite }
+        guard !searchText.isEmpty else { return store.connections }
+        return store.connections.filter {
+            $0.name.localizedCaseInsensitiveContains(searchText)
+                || $0.host.localizedCaseInsensitiveContains(searchText)
+        }
     }
 
     /// Only a single, unambiguous selection maps to menu-bar commands —
@@ -42,54 +41,10 @@ struct ConnectionListPanel: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Spacer()
-
-                HStack {
-                    Image(systemName: "magnifyingglass")
-                        .foregroundStyle(.secondary)
-                    TextField("Search for connection…", text: $searchText)
-                        .textFieldStyle(.plain)
-                }
-                .padding(6)
-                .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
-                .frame(width: 240)
-            }
-            .padding(12)
-
-            Divider()
-
-            if store.connections.isEmpty {
-                ContentUnavailableView(
-                    "No Connections",
-                    systemImage: "server.rack",
-                    description: Text("Click + to create your first LDAP connection.")
-                )
-            } else {
-                List(filteredConnections, selection: $selection) { connection in
-                    ConnectionRow(
-                        connection: connection,
-                        isHovering: hoveredConnectionID == connection.id,
-                        onToggleFavorite: { store.setFavorite(!connection.isFavorite, for: connection.id) }
-                    )
-                        .contentShape(Rectangle())
-                        .onHover { hovering in
-                            hoveredConnectionID = hovering ? connection.id : nil
-                        }
-                        .overlay(
-                            DoubleClickObserver {
-                                openWindow(value: connection)
-                            }
-                            .allowsHitTesting(false)
-                        )
-                        .contextMenu {
-                            contextMenu(for: connection)
-                        }
-                }
-                .listStyle(.plain)
-            }
-        }
+        content
+        .navigationTitle("Connections")
+        .navigationSubtitle(store.connections.isEmpty ? "" : "\(store.connections.count) saved")
+        .searchable(text: $searchText, placement: .toolbar, prompt: "Search")
         .sheet(item: $connectionToEdit) { connection in
             NewConnectionSheet(existingConnection: connection)
         }
@@ -144,6 +99,71 @@ struct ConnectionListPanel: View {
             },
             isFavorite: singleSelectedConnection?.isFavorite ?? false
         ))
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        let connections = filteredConnections
+        if store.connections.isEmpty {
+            ContentUnavailableView {
+                Label("No Connections Yet", systemImage: "server.rack")
+            } description: {
+                Text("Add an LDAP or Active Directory server to start browsing it, or import connections from LDAP Admin or another Mac.")
+            } actions: {
+                Button("New Connection…", action: onNewConnection)
+                    .buttonStyle(.glassProminent)
+                Button("Import…", action: onImport)
+                    .buttonStyle(.glass)
+            }
+        } else if connections.isEmpty {
+            ContentUnavailableView.search(text: searchText)
+        } else {
+            let favorites = connections.filter(\.isFavorite)
+            let others = connections.filter { !$0.isFavorite }
+            List(selection: $selection) {
+                if !favorites.isEmpty {
+                    Section("Favorites") {
+                        rows(for: favorites)
+                    }
+                }
+                if !others.isEmpty {
+                    Section(favorites.isEmpty ? "Connections" : "All Connections") {
+                        rows(for: others)
+                    }
+                }
+            }
+            .listStyle(.inset)
+            .listSectionSeparator(.hidden)
+        }
+    }
+
+    private func rows(for connections: [SavedConnection]) -> some View {
+        ForEach(connections) { connection in
+            ConnectionRow(
+                connection: connection,
+                isHovering: hoveredConnectionID == connection.id,
+                onToggleFavorite: { store.setFavorite(!connection.isFavorite, for: connection.id) },
+                onOpen: { openWindow(value: connection) }
+            )
+            .contentShape(Rectangle())
+            .onHover { hovering in
+                if hovering {
+                    hoveredConnectionID = connection.id
+                } else if hoveredConnectionID == connection.id {
+                    hoveredConnectionID = nil
+                }
+            }
+            .overlay(
+                DoubleClickObserver {
+                    openWindow(value: connection)
+                }
+                .allowsHitTesting(false)
+            )
+            .contextMenu {
+                contextMenu(for: connection)
+            }
+            .listRowSeparator(.hidden)
+        }
     }
 
     /// The connections a context-menu action should apply to: the full
@@ -262,7 +282,7 @@ struct ConnectionListPanel: View {
 }
 
 #Preview {
-    ConnectionListPanel()
+    ConnectionListPanel(onNewConnection: {}, onImport: {})
         .frame(width: 500, height: 400)
         .environment(ConnectionStore())
 }
