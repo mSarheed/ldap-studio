@@ -56,6 +56,10 @@ final class SearchSession {
     /// Bumped by each run, so a stopped search finishing late can't touch
     /// the state of the one that replaced it.
     @ObservationIgnored private var generation = 0
+    /// Where the results came from and what was read of each, so a result
+    /// edited meanwhile can be read again.
+    @ObservationIgnored private var target: LdapTarget?
+    @ObservationIgnored private var readAttributes: [String] = []
 
     init(query: SearchQuery, directoryBaseDN: String) {
         self.query = query
@@ -84,6 +88,8 @@ final class SearchSession {
         let request = LdapSearchRequest(baseDn: baseDN, scope: query.depth.scope, filter: filter,
                                         attributes: attributes, idleTimeout: 0)
         self.columns = columns
+        self.target = target
+        readAttributes = attributes
         errorMessage = nil
         wasCancelled = false
         wasTruncated = false
@@ -181,25 +187,13 @@ final class SearchSession {
         switch change {
         case let .removed(dn): ancestor = dn
         case let .moved(from, _): ancestor = from
-        case .added, .modified, .branchChanged: return
+        case let .modified(dn):
+            await reread(dn)
+            return
+        case .added, .branchChanged: return
         }
         let ancestorKey = DN.normalize(ancestor)
-        let generation = generation
-        var keys: [String] = []
-        var isCurrent = false
-        // A page arriving while the keys are worked out makes them out of
-        // date; try again a few times, then work them out here.
-        for _ in 0..<3 {
-            let (fresh, revision) = await store.keys()
-            // A new search replaced these results: the change is moot.
-            guard generation == self.generation else { return }
-            if revision == store.revision {
-                keys = fresh
-                isCurrent = true
-                break
-            }
-        }
-        if !isCurrent { keys = store.hits.map(\.dn).map(DN.normalize) }
+        guard let keys = await currentKeys() else { return }
         let affected = Set(keys.indices.filter { DN.keyIsWithin(keys[$0], ancestorKey) })
         guard !affected.isEmpty else { return }
         switch change {
@@ -211,11 +205,53 @@ final class SearchSession {
                 Hit(dn: DN.rebase(hit.dn, from: from, to: to), icon: hit.icon, name: hit.name, values: hit.values)
             }
             selection.removeAll()
+            results = Array(store.hits.prefix(displayLimit))
+            totalFound = store.hits.count
+            // A rename changes the entry's own name and naming attribute.
+            await reread(to)
+            return
         default:
             return
         }
         results = Array(store.hits.prefix(displayLimit))
         totalFound = store.hits.count
+    }
+
+    /// Reads `dn` again, if it's a result, so its row shows what it holds now.
+    private func reread(_ dn: String) async {
+        guard let target, !store.hits.isEmpty else { return }
+        let generation = generation
+        let columns = columns
+        guard let entry = try? await fetchEntry(target, dn: dn, attributes: readAttributes),
+              generation == self.generation,
+              let keys = await currentKeys()
+        else { return }
+        let key = DN.normalize(dn)
+        guard let index = keys.firstIndex(of: key) else { return }
+        store.replace(at: [index]) { _ in Self.hit(from: entry, columns: columns) }
+        results = Array(store.hits.prefix(displayLimit))
+    }
+
+    /// `DN.normalize` of every hit, for the hits as they are now; nil when a
+    /// new search replaced them meanwhile.
+    private func currentKeys() async -> [String]? {
+        let generation = generation
+        var keys: [String] = []
+        var isCurrent = false
+        // A page arriving while the keys are worked out makes them out of
+        // date; try again a few times, then work them out here.
+        for _ in 0..<3 {
+            let (fresh, revision) = await store.keys()
+            // A new search replaced these results: the change is moot.
+            guard generation == self.generation else { return nil }
+            if revision == store.revision {
+                keys = fresh
+                isCurrent = true
+                break
+            }
+        }
+        if !isCurrent { keys = store.hits.map(\.dn).map(DN.normalize) }
+        return keys
     }
 }
 

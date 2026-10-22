@@ -233,6 +233,7 @@ struct BrowserView: View {
             onEditSavedSearches: editSavedSearches,
             onOpenSearch: openSearch,
             isShowingSearchResults: isShowingSearch && searchSession != nil,
+            onShowEntry: { isShowingSearch = false },
             operations: operations,
             onChange: { change in await apply(change) },
             onRefreshDetail: { detailReloadToken += 1 }

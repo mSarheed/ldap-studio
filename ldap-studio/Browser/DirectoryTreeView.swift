@@ -24,6 +24,9 @@ struct DirectoryTreeView: View {
     /// The detail view shows search results rather than the selected entry,
     /// so menu commands for the selected entry are off.
     let isShowingSearchResults: Bool
+    /// Shows the selected entry in place of search results — for when it's
+    /// picked again while already selected, which changes no selection.
+    let onShowEntry: () -> Void
     /// Branch-level delete / move / copy / export, shared with the detail
     /// view; `BrowserView` shows its progress and confirmations.
     let operations: BranchOperations
@@ -107,6 +110,7 @@ struct DirectoryTreeView: View {
                     kind: $searchKind,
                     baseDN: $searchBaseDN,
                     selection: $selection,
+                    onShowEntry: onShowEntry,
                     focusRequest: searchResultsFocusRequest,
                     tree: tree,
                     connection: connection,
@@ -914,6 +918,7 @@ struct DirectoryTreeView: View {
         rowContext.pickedInList = nil
         if selection == dn {
             treeSelection = [dn]
+            onShowEntry()
         } else {
             selection = dn
         }

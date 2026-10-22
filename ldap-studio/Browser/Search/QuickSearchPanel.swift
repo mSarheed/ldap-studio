@@ -18,6 +18,9 @@ struct QuickSearchPanel: View {
     /// nil = the whole directory.
     @Binding var baseDN: String?
     @Binding var selection: DirectoryEntry.ID?
+    /// Shows the selected entry in the detail view — needed as well as
+    /// setting `selection`, which may already be this entry.
+    let onShowEntry: () -> Void
     /// Bumped by ↓ in the search field: move into the results.
     let focusRequest: Int
     let tree: DirectoryTree
@@ -260,7 +263,9 @@ struct QuickSearchPanel: View {
                 if listSelection == nil { listSelection = first.dn }
             }
             .onChange(of: listSelection) { _, dn in
-                if let dn { selection = dn }
+                guard let dn else { return }
+                selection = dn
+                onShowEntry()
             }
             .onKeyPress(.return) {
                 guard let dn = listSelection else { return .ignored }
