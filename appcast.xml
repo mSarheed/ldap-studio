@@ -4,6 +4,23 @@
         <title>LDAP Studio</title>
         <language>en</language>
         <item>
+            <title>LDAP Studio 1.4.2-beta.3</title>
+            <pubDate>Thu, 22 Oct 2026 09:11:18 GMT</pubDate>
+            <sparkle:version>6</sparkle:version>
+            <sparkle:shortVersionString>1.4.2-beta.3</sparkle:shortVersionString>
+            <sparkle:channel>beta</sparkle:channel>
+            <sparkle:minimumSystemVersion>27.0</sparkle:minimumSystemVersion>
+            <sparkle:fullReleaseNotesLink>https://github.com/mSarheed/ldap-studio/releases/tag/v1.4.2-beta.3</sparkle:fullReleaseNotesLink>
+            <description><![CDATA[<p dir="auto">A beta of the next LDAP Studio. Betas reach you as updates while <strong>LDAP Studio → Check for Beta Versions</strong> is on.</p>
+
+<h2 dir="auto">What's Changed</h2>
+<ul dir="auto">
+<li>🔒 Trust the certificate authority, not one server's certificate by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/mSarheed/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/mSarheed">@mSarheed</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="5976306091" data-permission-text="Title is private" data-url="https://github.com/mSarheed/ldap-studio/issues/8" data-hovercard-type="pull_request" data-hovercard-url="/mSarheed/ldap-studio/pull/8/hovercard" href="https://github.com/mSarheed/ldap-studio/pull/8">#8</a></li>
+</ul>
+<p dir="auto"><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/mSarheed/ldap-studio/compare/v1.4.2-beta.2...v1.4.2-beta.3"><tt>v1.4.2-beta.2...v1.4.2-beta.3</tt></a></p>]]></description>
+            <enclosure url="https://github.com/mSarheed/ldap-studio/releases/download/v1.4.2-beta.3/ldap-studio-v1.4.2-beta.3.zip" length="6944995" type="application/octet-stream" sparkle:edSignature="OeCntrL63jHnfEDJVOfM8e+nRt6/5RYBXKpXx+ksyfqEEKfOcVSCwSZjF0QWwFP39oTgwelPfcQeVd3SUkOgAQ=="/>
+        </item>
+        <item>
             <title>LDAP Studio 1.4.2-beta.2</title>
             <pubDate>Thu, 22 Oct 2026 07:41:17 GMT</pubDate>
             <sparkle:version>5</sparkle:version>
