@@ -47,6 +47,10 @@ struct BrowserView: View {
     /// server doesn't expose a usable schema), autocomplete just has no
     /// suggestions rather than the whole browser failing to open.
     @State private var schema: LdapSchema?
+    /// The search last opened as a table, kept while an entry is shown so
+    /// its results are one click away.
+    @State private var searchSession: SearchSession?
+    @State private var isShowingSearch = false
 
     private var endpoint: String { connection.endpoint }
 
@@ -131,10 +135,18 @@ struct BrowserView: View {
             tree = DirectoryTree(connection: connection)
             schema = nil
             operations.schema = nil
+            searchSession?.stop()
+            searchSession = nil
+            isShowingSearch = false
             loadError = nil
             isShowingCertTrust = false
             pendingSSHHostKey = nil
             Task { await reload(selecting: selection) }
+        }
+        .onChange(of: selection) {
+            // An entry picked in the tree or the search field is shown in
+            // place of the table.
+            isShowingSearch = false
         }
         .onChange(of: connection) {
             // Every edit, connect settings or not — branch operations check
@@ -198,7 +210,8 @@ struct BrowserView: View {
             schema: schema,
             bookmarks: connection.bookmarks,
             onToggleBookmark: toggleBookmark,
-            onUpdateSavedFilters: updateSavedFilters,
+            onEditSavedSearches: editSavedSearches,
+            onOpenSearch: openSearch,
             operations: operations,
             onChange: { change in await apply(change) },
             onRefreshDetail: { detailReloadToken += 1 }
@@ -208,6 +221,60 @@ struct BrowserView: View {
 
     @ViewBuilder
     private var detail: some View {
+        if isShowingSearch, let searchSession, tree.root != nil {
+            SearchResultsView(
+                session: searchSession,
+                connection: connection,
+                tree: tree,
+                schema: schema,
+                selectedDN: selection,
+                onOpen: { dn in openFromSearch(dn) },
+                onClose: { isShowingSearch = false },
+                onChange: { change in await apply(change) },
+                onEditSavedSearches: editSavedSearches
+            )
+            .id(ObjectIdentifier(searchSession))
+        } else {
+            VStack(spacing: 0) {
+                if let searchSession, tree.root != nil {
+                    backToResultsBar(searchSession)
+                }
+                entryDetail
+            }
+        }
+    }
+
+    private func backToResultsBar(_ session: SearchSession) -> some View {
+        HStack(spacing: 8) {
+            Button {
+                isShowingSearch = true
+            } label: {
+                Label("Back to Search Results", systemImage: "chevron.left")
+            }
+            .buttonStyle(.borderless)
+            Text(session.query.summary)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer()
+            Button {
+                session.stop()
+                searchSession = nil
+            } label: {
+                Image(systemName: "xmark")
+            }
+            .buttonStyle(.borderless)
+            .help("Close the Search")
+        }
+        .font(.callout)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(.bar)
+        .overlay(alignment: .bottom) { Divider() }
+    }
+
+    @ViewBuilder
+    private var entryDetail: some View {
         // Not while (re)connecting: a selection kept across a settings
         // change may not exist on the server being connected to.
         if let selection, tree.root != nil {
@@ -228,6 +295,29 @@ struct BrowserView: View {
                 systemImage: "sidebar.left",
                 description: Text("Select an entry from the tree to view its attributes.")
             )
+        }
+    }
+
+    /// Opens `query` as a table in the detail view, running it straight
+    /// away unless it's blank (which would list the whole directory).
+    private func openSearch(_ query: SearchQuery) {
+        searchSession?.stop()
+        let session = SearchSession(query: query, directoryBaseDN: tree.baseDN)
+        searchSession = session
+        isShowingSearch = true
+        if query != SearchQuery(baseDN: query.baseDN),
+           let filter = session.run(target: connection.ldapTarget, schema: schema) {
+            editSavedSearches { SavedSearches.recording(query, filter: filter, in: $0) }
+        }
+    }
+
+    /// Shows a result: in the tree, and its attributes in place of the
+    /// table — which stays a click away.
+    private func openFromSearch(_ dn: String) {
+        isShowingSearch = false
+        Task {
+            let found = try? await tree.reveal(dn)
+            selection = found ?? tree.node(dn)?.dn ?? dn
         }
     }
 
@@ -262,9 +352,11 @@ struct BrowserView: View {
         store.update(updated)
     }
 
-    private func updateSavedFilters(_ filters: [SavedLDAPFilter]) {
-        var updated = connection
-        updated.savedFilters = filters
+    /// Changes this connection's saved and recent searches, starting from
+    /// the store's current list rather than one a view may have kept.
+    private func editSavedSearches(_ edit: ([SavedLDAPFilter]) -> [SavedLDAPFilter]) {
+        var updated = store.latest(connection)
+        updated.savedFilters = edit(updated.savedFilters)
         store.update(updated)
     }
 
@@ -359,6 +451,7 @@ struct BrowserView: View {
     /// Brings the tree and the detail view up to date after a write,
     /// touching only the entries it affected.
     private func apply(_ change: DirectoryChange) async {
+        await searchSession?.apply(change)
         switch change {
         case let .added(dn):
             await tree.entryAdded(dn)

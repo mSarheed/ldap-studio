@@ -382,7 +382,7 @@ struct ServerInfoView: View {
 /// Left-to-right wrapping layout — each subview keeps its own natural
 /// size (unlike `LazyVGrid`, whose adaptive columns share one width per
 /// row) and wraps to a new line only when it no longer fits.
-private struct FlowLayout: Layout {
+struct FlowLayout: Layout {
     var spacing: CGFloat = 6
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {

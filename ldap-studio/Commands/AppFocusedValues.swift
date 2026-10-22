@@ -34,6 +34,9 @@ struct DirectoryCommands {
     var openSchema: () -> Void
     var openLDIFEditor: () -> Void
     var openServerInfo: () -> Void
+    /// Puts the cursor in the sidebar's search field.
+    var find: () -> Void
+    /// Opens a search as a table, to search with conditions.
     var advancedSearch: () -> Void
     /// Opens the "Go to DN" quick-jump.
     var goToDN: () -> Void

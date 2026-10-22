@@ -18,7 +18,9 @@ struct DirectoryTreeView: View {
     /// `BrowserView` owns the list and persists it.
     let bookmarks: [String]
     let onToggleBookmark: (String) -> Void
-    let onUpdateSavedFilters: ([SavedLDAPFilter]) -> Void
+    let onEditSavedSearches: (([SavedLDAPFilter]) -> [SavedLDAPFilter]) -> Void
+    /// Opens a search as a table in the detail view.
+    let onOpenSearch: (SearchQuery) -> Void
     /// Branch-level delete / move / copy / export, shared with the detail
     /// view; `BrowserView` shows its progress and confirmations.
     let operations: BranchOperations
@@ -41,13 +43,6 @@ struct DirectoryTreeView: View {
         var id: String { parentDN }
     }
 
-    /// Carries which subtree the Advanced Search sheet should start scoped
-    /// to — the entry it was launched from, rather than always the root.
-    private struct AdvancedSearchRequest: Identifiable {
-        let baseDN: String
-        var id: String { baseDN }
-    }
-
     @State private var pickerRequest: PickerRequest?
     @State private var newEntryRequest: NewEntryRequest?
     @State private var groupForMembersEditing: DirectoryEntry?
@@ -57,7 +52,6 @@ struct DirectoryTreeView: View {
 
     @State private var isPerformingAction = false
     @State private var actionError: String?
-    @State private var advancedSearchRequest: AdvancedSearchRequest?
 
     @State private var isShowingGoTo = false
     @State private var goToText = ""
@@ -70,19 +64,14 @@ struct DirectoryTreeView: View {
     /// selection change doesn't make SwiftUI re-evaluate thousands of rows.
     @State private var rowContext = TreeRowContext()
 
-    // Quick search — a server-side search over the whole directory, shown
-    // in place of the tree while the field has text.
+    // The search field. While it's in use, the sidebar shows the search
+    // (see QuickSearchPanel) in place of the tree; Esc goes back.
     @State private var searchText = ""
-    @State private var searchHits: [LdapEntry] = []
-    @State private var searchState: QuickSearchState = .idle
-    @State private var searchSelection: String?
-    private static let quickSearchLimit = 200
-
-    private enum QuickSearchState: Equatable {
-        case idle, searching
-        case done(isComplete: Bool)
-        case failed(String)
-    }
+    @State private var searchKind: EntryKind = .all
+    @State private var searchBaseDN: String?
+    @State private var isSearchMode = false
+    @State private var searchResultsFocusRequest = 0
+    @FocusState private var isSearchFieldFocused: Bool
 
     private var actions: EntryActions {
         EntryActions(connection: connection, schema: schema)
@@ -101,18 +90,34 @@ struct DirectoryTreeView: View {
 
     private var isReadOnly: Bool { connection.isReadOnly }
 
-    private var isSearching: Bool {
-        !searchText.trimmingCharacters(in: .whitespaces).isEmpty
-    }
-
     var body: some View {
         VStack(spacing: 0) {
             toolbar
 
+            searchField
+
             Divider()
 
-            if isSearching {
-                quickSearchResults
+            if isSearchMode {
+                QuickSearchPanel(
+                    text: $searchText,
+                    kind: $searchKind,
+                    baseDN: $searchBaseDN,
+                    selection: $selection,
+                    focusRequest: searchResultsFocusRequest,
+                    tree: tree,
+                    connection: connection,
+                    schema: schema,
+                    onReveal: { dn in
+                        endSearch()
+                        reveal(dn)
+                    },
+                    onOpenTable: { query in
+                        endSearch()
+                        onOpenSearch(query)
+                    },
+                    onEditSavedSearches: onEditSavedSearches
+                )
             } else {
                 treeList
             }
@@ -128,7 +133,6 @@ struct DirectoryTreeView: View {
                 }
             }
         }
-        .task(id: searchText) { await runQuickSearch() }
         .sheet(item: $pickerRequest) { request in
             let isMove = request.kind == .move
             DestinationPickerSheet(
@@ -161,17 +165,6 @@ struct DirectoryTreeView: View {
                 createEntry(dn: dn, attributes: attributes)
             }
         }
-        .sheet(item: $advancedSearchRequest) { request in
-            AdvancedSearchSheet(
-                connection: connection,
-                tree: tree,
-                schema: schema,
-                defaultBaseDN: request.baseDN,
-                onSelect: { dn in reveal(dn) },
-                onChange: onChange,
-                onUpdateSavedFilters: onUpdateSavedFilters
-            )
-        }
         .sheet(item: $groupForMembersEditing) { group in
             GroupMembersSheet(group: group, connection: connection) {
                 await onChange(.modified(group.dn))
@@ -196,9 +189,8 @@ struct DirectoryTreeView: View {
             openSchema: { openWindow(id: "schema", value: connection) },
             openLDIFEditor: { openWindow(id: "ldif", value: connection) },
             openServerInfo: { openWindow(id: "serverInfo", value: connection) },
-            advancedSearch: {
-                advancedSearchRequest = AdvancedSearchRequest(baseDN: selection ?? tree.baseDN)
-            },
+            find: { beginSearch() },
+            advancedSearch: { onOpenSearch(SearchQuery()) },
             goToDN: { openGoTo() },
             reloadTree: { reloadTree() },
             toggleBookmark: selection.map { dn in { onToggleBookmark(dn) } },
@@ -303,132 +295,74 @@ struct DirectoryTreeView: View {
         if rowContext.isReadOnly != isReadOnly { rowContext.isReadOnly = isReadOnly }
     }
 
-    // MARK: - Quick search
+    // MARK: - Search field
 
-    private var quickSearchResults: some View {
-        VStack(spacing: 0) {
-            List(selection: $searchSelection) {
-                ForEach(searchHits, id: \.dn) { hit in
-                    HStack(spacing: 6) {
-                        Image(systemName: TreeRow.icon(for: hit, mayHaveChildren: false))
-                            .foregroundStyle(Color.accentColor)
-                            .frame(width: 18)
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(DN.rdn(of: hit.dn)).lineLimit(1)
-                            Text(DN.parent(of: hit.dn) ?? "")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                                .truncationMode(.head)
-                        }
-                        Spacer(minLength: 4)
-                        Button {
-                            revealFromSearch(hit.dn)
-                        } label: {
-                            Image(systemName: "arrow.right.circle")
-                        }
-                        .buttonStyle(.borderless)
-                        .help("Reveal in Tree")
-                    }
-                    .tag(hit.dn)
-                    .contentShape(Rectangle())
-                    .onTapGesture(count: 2) { revealFromSearch(hit.dn) }
+    private var searchField: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+            TextField("Search people, groups, OUs…", text: $searchText)
+                .textFieldStyle(.plain)
+                .focused($isSearchFieldFocused)
+                .onExitCommand { endSearch() }
+                .onKeyPress(.downArrow) {
+                    guard isSearchMode, !searchText.isEmpty else { return .ignored }
+                    searchResultsFocusRequest += 1
+                    return .handled
                 }
-            }
-            .onChange(of: searchSelection) { _, dn in
-                if let dn { selection = dn }
-            }
-            .onKeyPress(.return) {
-                guard let dn = searchSelection else { return .ignored }
-                revealFromSearch(dn)
-                return .handled
-            }
-            .overlay {
-                if searchState == .done(isComplete: true), searchHits.isEmpty {
-                    ContentUnavailableView.search(text: searchText)
+                .help("Finds entries whose name, uid or e-mail starts with this (* is a wildcard, mail:… looks at one attribute, and a filter in parentheses runs as it is)")
+            if isSearchMode {
+                Button {
+                    endSearch()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
                 }
+                .buttonStyle(.borderless)
+                .help("Back to the Tree (Esc)")
+            } else {
+                Text("⌘F")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
             }
-
-            Divider()
-
-            HStack(spacing: 6) {
-                switch searchState {
-                case .idle, .searching:
-                    ProgressView().controlSize(.small)
-                    Text("Searching the directory…")
-                case let .done(isComplete):
-                    Text(isComplete
-                         ? "\(searchHits.count) match\(searchHits.count == 1 ? "" : "es")"
-                         : "First \(searchHits.count) matches — refine the search, or use Advanced Search")
-                case let .failed(message):
-                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                    Text(message).lineLimit(2)
-                }
-                Spacer(minLength: 0)
-            }
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 7))
+        .overlay {
+            RoundedRectangle(cornerRadius: 7)
+                .strokeBorder(isSearchFieldFocused ? Color.accentColor.opacity(0.7) : .clear, lineWidth: 1.5)
+        }
+        .padding(.horizontal, 8)
+        .padding(.bottom, 6)
+        .background {
+            // Here as well as in the Entry menu: a window's own shortcuts
+            // come before the menu bar's, where Edit › Find (for the LDIF
+            // editor's find bar) would otherwise take ⌘F first.
+            Button("Find") { beginSearch() }
+                .keyboardShortcut("f", modifiers: .command)
+                .opacity(0)
+                .frame(width: 0, height: 0)
+                .accessibilityHidden(true)
+        }
+        // A click, ⌘F or typing opens the search — not focus alone, which
+        // also lands here when a popover or sheet elsewhere closes.
+        .simultaneousGesture(TapGesture().onEnded { isSearchMode = true })
+        .onChange(of: searchText) { _, text in
+            if !text.isEmpty { isSearchMode = true }
         }
     }
 
-    /// Matches names starting with the typed text (a `*` anywhere is a
-    /// wildcard) across the naming attributes the server knows, anywhere
-    /// under the base DN. Typing a whole filter in parentheses runs it as is.
-    static func quickSearchFilter(for text: String, schema: LdapSchema?) -> String {
-        if text.hasPrefix("("), text.hasSuffix(")") { return text }
-        let pattern = text.contains("*")
-            ? text.split(separator: "*", omittingEmptySubsequences: false)
-                .map { DN.escapeFilterValue(String($0)) }
-                .joined(separator: "*")
-            : DN.escapeFilterValue(text) + "*"
-        var attributes = ["cn", "uid", "ou", "o", "dc", "sn", "givenName", "displayName",
-                          "mail", "sAMAccountName", "name"]
-        if let schema {
-            let known = Set(schema.attributeTypes.flatMap(\.names).map { $0.lowercased() })
-            let filtered = attributes.filter { known.contains($0.lowercased()) }
-            if !filtered.isEmpty { attributes = filtered }
-        }
-        return "(|" + attributes.map { "(\($0)=\(pattern))" }.joined() + ")"
+    private func beginSearch() {
+        isSearchMode = true
+        isSearchFieldFocused = true
     }
 
-    private func runQuickSearch() async {
-        let text = searchText.trimmingCharacters(in: .whitespaces)
-        guard !text.isEmpty else {
-            searchHits = []
-            searchState = .idle
-            return
-        }
-        searchState = .searching
-        // Debounce: typing again cancels this task before it searches.
-        try? await Task.sleep(for: .milliseconds(300))
-        guard !Task.isCancelled else { return }
-        do {
-            let result = try await searchAll(tree.target, LdapSearchRequest(
-                baseDn: tree.baseDN, scope: .subtree,
-                filter: Self.quickSearchFilter(for: text, schema: schema),
-                attributes: ["objectClass", "univentionObjectType"],
-                limit: Self.quickSearchLimit
-            ))
-            guard !Task.isCancelled else { return }
-            searchHits = result.entries.sorted {
-                (DN.depth($0.dn), $0.dn.lowercased()) < (DN.depth($1.dn), $1.dn.lowercased())
-            }
-            searchState = .done(isComplete: result.isComplete)
-        } catch is CancellationError {
-        } catch {
-            guard !Task.isCancelled else { return }
-            searchHits = []
-            searchState = .failed("\(error)")
-        }
-    }
-
-    /// Leaves search mode and shows `dn` in the tree, loading its ancestors.
-    private func revealFromSearch(_ dn: String) {
+    /// Leaves the search for the tree, keeping the chips as they were.
+    private func endSearch() {
         searchText = ""
-        searchSelection = nil
-        reveal(dn)
+        isSearchMode = false
+        isSearchFieldFocused = false
     }
 
     // MARK: - Toolbar
@@ -521,17 +455,12 @@ struct DirectoryTreeView: View {
 
             bookmarksMenu
 
-            TextField("Search", text: $searchText)
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 140)
-                .help("Finds entries anywhere in the directory whose name starts with this (use * as a wildcard, or type a full LDAP filter in parentheses)")
-
             Button {
-                advancedSearchRequest = AdvancedSearchRequest(baseDN: selection ?? tree.baseDN)
+                onOpenSearch(SearchQuery())
             } label: {
                 Image(systemName: "slider.horizontal.3")
             }
-            .help("Advanced Search (⇧⌘F)")
+            .help("Search with Conditions (⇧⌘F)")
         }
         .buttonStyle(.borderless)
         .padding(.horizontal, 8)
@@ -675,13 +604,10 @@ struct DirectoryTreeView: View {
         .keyboardShortcut("r", modifiers: .command)
 
         Button {
-            DispatchQueue.main.async {
-                advancedSearchRequest = AdvancedSearchRequest(baseDN: node.dn)
-            }
+            onOpenSearch(SearchQuery(baseDN: node.dn))
         } label: {
-            Label("Advanced Search…", systemImage: "magnifyingglass")
+            Label("Search in This Branch…", systemImage: "magnifyingglass")
         }
-        .keyboardShortcut("f", modifiers: [.command, .shift])
 
         let isBookmarked = bookmarkSet.contains(DN.normalize(node.dn))
         Button {

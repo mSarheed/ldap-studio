@@ -36,7 +36,7 @@ Betas of the next version are published as pre-releases (`vx.x.x-beta.n`). Turn 
 - Save, edit, and organize multiple LDAP connections
 - Import/export connections as JSON (with an optional, obscured password) or from LDAP Admin's `.lcf` format
 - Directory tree loaded on demand, so it stays fast on directories of any size (Active Directory included): each branch is read when you expand it, with paged searches that never hit the server's size limit
-- Quick search across the whole directory, and real LDAP filter (RFC 4515) advanced search with progress and cancel
+- Search from the sidebar (⌘F): narrow to people, groups, OUs or computers and to a branch, see why each result matched, and open the results as a table (⌘↩) to add conditions, save the search, or export, move and delete them. The LDAP filter is always shown, and can be edited by hand (RFC 4515, checked as you type)
 - Add, edit, view, and delete attributes, including binary values
 - View and set photos (`jpegPhoto`), auto-resized and center-cropped to 300×300
 - Set passwords (`userPassword`) with client-side hashing (PBKDF2-SHA512 by default, plus Unix/MD5/SHA-256/SHA-512 Crypt, MD5, SHA1, SMD5, and SSHA for compatibility); the plaintext is never stored or sent as-is
