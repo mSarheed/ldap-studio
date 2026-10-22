@@ -149,7 +149,7 @@ typedef struct {
   bool allow_untrusted;
   char *pinned_sha256;  /* lowercase hex, no separators; NULL = none */
   char *trusted_ca_pem; /* see ls_set_tls_trust; NULL = none */
-  bool check_host_name;
+  LSHostNames host_names;
   /* behavior + bind method — see ls_set_connection_policy */
   bool chase_referrals;
   unsigned timeout_seconds;
@@ -170,7 +170,6 @@ typedef struct {
 } ConnPolicy;
 
 static ConnPolicy g_policy = {
-    .check_host_name = true,
     .timeout_seconds = LS_CONNECT_TIMEOUT_SECS,
     .auth_method = LS_AUTH_SIMPLE,
     .ssh_port = 22,
@@ -493,15 +492,15 @@ void ls_set_tls_policy(bool start_tls, bool allow_untrusted,
   g_policy.pinned_sha256 = pinned_sha256 ? normalize_hex(pinned_sha256) : NULL;
 }
 
-void ls_set_tls_trust(const char *trusted_ca_pem, bool check_host_name) {
+void ls_set_tls_trust(const char *trusted_ca_pem, LSHostNames host_names) {
   replace_string(&g_policy.trusted_ca_pem, trusted_ca_pem);
-  g_policy.check_host_name = check_host_name;
+  g_policy.host_names = host_names;
 }
 
 /* Whether the core checks the server's chain itself after the handshake
  * (see ls_set_tls_trust) rather than leaving it to libldap. */
 static bool verifies_chain_itself(const ConnPolicy *p) {
-  return p->trusted_ca_pem != NULL || !p->check_host_name;
+  return p->trusted_ca_pem != NULL || p->host_names != LS_HOST_NAMES_EXACT;
 }
 
 /* Whether libldap verifies the server's certificate during the handshake.
@@ -526,13 +525,27 @@ static SSL *tls_session(LDAP *ld) {
 }
 
 /* `host` as a certificate names it: an IPv6 address without the brackets
- * an LDAP URI needs around it ("[::1]" → "::1"). Caller frees. */
+ * an LDAP URI needs around it ("[::1]" → "::1"), a host name without the
+ * root dot it may end in ("corp.example.com." → "corp.example.com").
+ * Caller frees. */
 static char *certificate_host(const char *host) {
   size_t len = strlen(host);
   if (len >= 2 && host[0] == '[' && host[len - 1] == ']') {
     return ls_strdup_n(host + 1, len - 2);
   }
+  if (len >= 2 && host[len - 1] == '.') return ls_strdup_n(host, len - 1);
   return ls_xstrdup(host);
+}
+
+/* The URI libldap connects to. A host name's root dot ("example.com.") is
+ * left off: libldap checks the certificate against the name as written,
+ * and no certificate is issued to one ending in a dot. Caller frees. */
+static char *ldap_uri(bool use_ssl, const char *host, uint16_t port) {
+  const char *name = host ? host : "";
+  size_t len = strlen(name);
+  if (len >= 2 && name[len - 1] == '.') len--;
+  return ls_aprintf("%s://%.*s:%u", use_ssl ? "ldaps" : "ldap", (int)len, name,
+                    (unsigned)port);
 }
 
 /* Adds every certificate in a PEM bundle to `store`. */
@@ -552,9 +565,11 @@ static void add_pem_certificates(X509_STORE *store, const char *pem) {
 /* Checks the chain the server presented on `ssl` against the bundled
  * certificate authorities and the ones `p` trusts — each trusted one
  * accepted as the top of the chain even when it isn't a root — and, when
- * `host` isn't NULL, that the certificate was issued to it. Returns
- * X509_V_OK, or the X509_V_ERR_* that failed. */
-static int verify_peer_chain(const ConnPolicy *p, SSL *ssl, const char *host) {
+ * `host` isn't NULL, that the certificate was issued to it — or with
+ * `subdomains`, to a server one level under it. Returns X509_V_OK, or the
+ * X509_V_ERR_* that failed. */
+static int verify_peer_chain(const ConnPolicy *p, SSL *ssl, const char *host,
+                             bool subdomains) {
   X509 *leaf = SSL_get0_peer_certificate(ssl);
   if (!leaf) return X509_V_ERR_UNSPECIFIED;
   X509_STORE *store = X509_STORE_new();
@@ -586,6 +601,15 @@ static int verify_peer_chain(const ConnPolicy *p, SSL *ssl, const char *host) {
       char *name = certificate_host(host);
       if (X509_VERIFY_PARAM_set1_ip_asc(param, name) != 1) {
         X509_VERIFY_PARAM_set1_host(param, name, 0);
+        if (subdomains) {
+          /* A leading dot names the servers under it; this flag keeps it
+           * to one level. */
+          char *parent = ls_aprintf(".%s", name);
+          X509_VERIFY_PARAM_add1_host(param, parent, 0);
+          X509_VERIFY_PARAM_set_hostflags(
+              param, X509_CHECK_FLAG_SINGLE_LABEL_SUBDOMAINS);
+          free(parent);
+        }
       }
       free(name);
     }
@@ -822,7 +846,9 @@ static const char *check_trusted_certificate(const ConnPolicy *p, LDAP *ld,
    * normal verification, not a replacement for it. */
   SSL *ssl = tls_session(ld);
   if (!ssl) return "the server's certificate could not be read";
-  int code = verify_peer_chain(p, ssl, p->check_host_name ? host : NULL);
+  int code = verify_peer_chain(p, ssl,
+                               p->host_names != LS_HOST_NAMES_ANY ? host : NULL,
+                               p->host_names == LS_HOST_NAMES_SUBDOMAINS);
   if (code == X509_V_OK) return NULL;
   if (p->pinned_sha256 && !p->trusted_ca_pem) {
     return "server certificate does not match the fingerprint trusted for "
@@ -855,10 +881,7 @@ static int connect_once(const ConnPolicy *p, const char *host, uint16_t port,
   bool tls = use_ssl;
   if (p->start_tls) tls = true;
 
-  const char *scheme = "ldap";
-  if (use_ssl) scheme = "ldaps";
-  char *uri = ls_aprintf("%s://%s:%u", scheme, connect_host ? connect_host : "",
-                         (unsigned)connect_port);
+  char *uri = ldap_uri(use_ssl, connect_host, connect_port);
   LDAP *ld = NULL;
   int rc = ldap_initialize(&ld, uri);
   free(uri);
@@ -1270,10 +1293,7 @@ static int probe_certificate(const ConnPolicy *p, const char *host,
     connect_host = "127.0.0.1";
   }
 
-  const char *scheme = "ldap";
-  if (use_ssl) scheme = "ldaps";
-  char *uri = ls_aprintf("%s://%s:%u", scheme, connect_host ? connect_host : "",
-                         (unsigned)connect_port);
+  char *uri = ldap_uri(use_ssl, connect_host, connect_port);
   LDAP *ld = NULL;
   int rc = ldap_initialize(&ld, uri);
   free(uri);
@@ -1320,7 +1340,7 @@ static int probe_certificate(const ConnPolicy *p, const char *host,
                    "the server did not present a certificate");
   }
   out->chain_pem = presented_chain_pem(ssl, cert);
-  int chain_code = verify_peer_chain(p, ssl, NULL);
+  int chain_code = verify_peer_chain(p, ssl, NULL, false);
   out->chain_trusted = chain_code == X509_V_OK;
   out->untrusted_issuer = is_untrusted_issuer(chain_code);
   out->chain_problem =
@@ -1347,7 +1367,14 @@ static int probe_certificate(const ConnPolicy *p, const char *host,
     char *name = certificate_host(host);
     /* -2: not an IP address, so a host name. */
     int match = X509_check_ip_asc(cert, name, 0);
-    if (match == -2) match = X509_check_host(cert, name, strlen(name), 0, NULL);
+    if (match == -2) {
+      match = X509_check_host(cert, name, strlen(name), 0, NULL);
+      char *parent = ls_aprintf(".%s", name);
+      out->subdomain_match =
+          X509_check_host(cert, parent, strlen(parent),
+                          X509_CHECK_FLAG_SINGLE_LABEL_SUBDOMAINS, NULL) == 1;
+      free(parent);
+    }
     out->host_mismatch = match != 1;
     free(name);
   }

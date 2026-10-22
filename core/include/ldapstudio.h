@@ -181,14 +181,24 @@ void ls_set_tls_policy(bool start_tls, bool allow_untrusted,
  * trusted. That's what makes one setting cover every server a host name
  * leads to (an Active Directory domain name leads to every domain
  * controller, each with a certificate of its own) and survive the
- * certificates being renewed. `check_host_name` false accepts a
- * certificate issued to another name. With trusted CAs or the host name
- * check off, libldap's own verification is off and the core checks the
- * chain itself once the handshake is done, before anything is sent —
- * through an SSH tunnel too, against the real host name. A pin set with
- * ls_set_tls_policy still accepts its certificate on its own. Pass
- * NULL/"" and true to reset. */
-void ls_set_tls_trust(const char *trusted_ca_pem, bool check_host_name);
+ * certificates being renewed. `host_names` says which names the
+ * certificate may be issued to (see LSHostNames). With trusted CAs or
+ * other names accepted, libldap's own verification is off and the core
+ * checks the chain itself once the handshake is done, before anything is
+ * sent — through an SSH tunnel too, against the real host name. A pin set
+ * with ls_set_tls_policy still accepts its certificate on its own. Pass
+ * NULL/"" and LS_HOST_NAMES_EXACT to reset. */
+typedef enum {
+  /* Only the host name connected to — the usual rule. */
+  LS_HOST_NAMES_EXACT = 0,
+  /* That, or a server one level under it: connected to an Active
+   * Directory domain name (corp.example.com), a domain controller's
+   * certificate is issued to its own name (dc1.corp.example.com). */
+  LS_HOST_NAMES_SUBDOMAINS,
+  /* Any name at all. */
+  LS_HOST_NAMES_ANY
+} LSHostNames;
+void ls_set_tls_trust(const char *trusted_ca_pem, LSHostNames host_names);
 
 typedef enum {
   LS_AUTH_SIMPLE = 0,
@@ -252,6 +262,9 @@ typedef struct {
    * words. */
   bool untrusted_issuer;
   char *chain_problem;
+  /* Issued to a server one level under the host name — what
+   * LS_HOST_NAMES_SUBDOMAINS accepts. */
+  bool subdomain_match;
 } LSCertInfo;
 
 int ls_probe_certificate(const char *host, uint16_t port, bool use_ssl,

@@ -111,7 +111,7 @@ struct NewConnectionSheet: View {
     /// Kept from the existing connection unless the user clears it here.
     @State private var trustedCertSHA256: String?
     @State private var trustedCACertificates: [Data]
-    @State private var checksCertificateHostName: Bool
+    @State private var certificateHostNames: CertificateHostNames
 
     // SSH tunnel
     @State private var useSSHTunnel: Bool
@@ -169,7 +169,7 @@ struct NewConnectionSheet: View {
         _timeoutSeconds = State(initialValue: existingConnection?.timeoutSeconds ?? 15)
         _trustedCertSHA256 = State(initialValue: existingConnection?.trustedCertSHA256)
         _trustedCACertificates = State(initialValue: existingConnection?.trustedCACertificates ?? [])
-        _checksCertificateHostName = State(initialValue: existingConnection?.checksCertificateHostName ?? true)
+        _certificateHostNames = State(initialValue: existingConnection?.certificateHostNames ?? .exact)
 
         _useSSHTunnel = State(initialValue: existingConnection?.useSSHTunnel ?? false)
         _sshHost = State(initialValue: existingConnection?.sshHost ?? "")
@@ -198,7 +198,7 @@ struct NewConnectionSheet: View {
     /// that nothing would check (see connect.c).
     private var referralsGoUnchecked: Bool {
         encryption != .none
-            && (trustedCertSHA256 != nil || !trustedCACertificates.isEmpty || !checksCertificateHostName)
+            && (trustedCertSHA256 != nil || !trustedCACertificates.isEmpty || certificateHostNames != .exact)
     }
 
     private var isValid: Bool {
@@ -225,7 +225,7 @@ struct NewConnectionSheet: View {
             bindDN: bindDN,
             trustedCertSHA256: trustedCertSHA256,
             trustedCACertificates: trustedCACertificates,
-            checksCertificateHostName: checksCertificateHostName,
+            certificateHostNames: certificateHostNames,
             bookmarks: existingConnection?.bookmarks ?? [],
             savedFilters: existingConnection?.savedFilters ?? [],
             isFavorite: existingConnection?.isFavorite ?? false,
@@ -297,7 +297,7 @@ struct NewConnectionSheet: View {
                 trusted.trust(decision)
                 trustedCertSHA256 = trusted.trustedCertSHA256
                 trustedCACertificates = trusted.trustedCACertificates
-                checksCertificateHostName = trusted.checksCertificateHostName
+                certificateHostNames = trusted.certificateHostNames
                 test()
             } onRetry: {
                 test()
@@ -425,7 +425,7 @@ struct NewConnectionSheet: View {
             hint("Allows the directory to redirect searches to another LDAP server.")
             if chaseReferrals && referralsGoUnchecked {
                 Label(
-                    "Referrals aren't followed while this connection trusts a certificate or certificate authority of its own, or skips the host-name check: the servers they lead to couldn't be checked the same way.",
+                    "Referrals aren't followed while this connection trusts a certificate or certificate authority of its own, or accepts certificates for other names: the servers they lead to couldn't be checked the same way.",
                     systemImage: "exclamationmark.triangle.fill"
                 )
                 .font(.caption)
@@ -443,9 +443,18 @@ struct NewConnectionSheet: View {
                 }
             }
             if encryption != .none {
-                Toggle("Check that the certificate matches the host name", isOn: $checksCertificateHostName)
-                if !checksCertificateHostName {
-                    hint("A certificate from a trusted certificate authority is accepted whatever name it was issued to.")
+                Picker("Certificate issued to", selection: $certificateHostNames) {
+                    Text("This host name").tag(CertificateHostNames.exact)
+                    Text("A server under it").tag(CertificateHostNames.subdomains)
+                    Text("Any name").tag(CertificateHostNames.any)
+                }
+                switch certificateHostNames {
+                case .exact:
+                    EmptyView()
+                case .subdomains:
+                    hint("Also accepts a server one level under it, the way an Active Directory domain controller's certificate is issued to its own name under the domain's.")
+                case .any:
+                    hint(CertificateTrustSheet.anyNameWarning)
                 }
             }
             if !trustedCACertificates.isEmpty {
@@ -593,8 +602,8 @@ struct NewConnectionSheet: View {
             if trustedCACertificates == existingConnection.trustedCACertificates {
                 connection.trustedCACertificates = latest.trustedCACertificates
             }
-            if checksCertificateHostName == existingConnection.checksCertificateHostName {
-                connection.checksCertificateHostName = latest.checksCertificateHostName
+            if certificateHostNames == existingConnection.certificateHostNames {
+                connection.certificateHostNames = latest.certificateHostNames
             }
         }
         KeychainService.savePassword(password, for: connection.id)

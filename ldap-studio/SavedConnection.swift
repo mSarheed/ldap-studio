@@ -85,9 +85,9 @@ struct SavedConnection: Identifiable, Codable, Hashable {
     /// domain name) and renewed certificates keep working. Either this or
     /// `trustedCertSHA256` accepting a certificate is enough.
     var trustedCACertificates: [Data]
-    /// Off accepts a certificate issued to another host name — for servers
-    /// whose certificates don't name the host this connection uses.
-    var checksCertificateHostName: Bool
+    /// Which names the server's certificate may be issued to — wider than
+    /// the host itself for servers whose certificates don't name it.
+    var certificateHostNames: CertificateHostNames
     /// DNs the user pinned for quick jumping, newest first.
     var bookmarks: [String]
     /// Named/pinned filters and the recent Advanced Search history for this
@@ -121,7 +121,7 @@ struct SavedConnection: Identifiable, Codable, Hashable {
     init(id: UUID = UUID(), name: String, host: String, port: Int, useSSL: Bool,
          useStartTLS: Bool = false, baseDN: String, bindDN: String,
          trustedCertSHA256: String? = nil, trustedCACertificates: [Data] = [],
-         checksCertificateHostName: Bool = true, bookmarks: [String] = [],
+         certificateHostNames: CertificateHostNames = .exact, bookmarks: [String] = [],
          savedFilters: [SavedLDAPFilter] = [],
          isFavorite: Bool = false, isReadOnly: Bool = false, allowsMCP: Bool = false,
          chaseReferrals: Bool = false, timeoutSeconds: Int = 15,
@@ -141,7 +141,7 @@ struct SavedConnection: Identifiable, Codable, Hashable {
         self.bindDN = bindDN
         self.trustedCertSHA256 = trustedCertSHA256
         self.trustedCACertificates = trustedCACertificates
-        self.checksCertificateHostName = checksCertificateHostName
+        self.certificateHostNames = certificateHostNames
         self.bookmarks = bookmarks
         self.savedFilters = savedFilters
         self.isFavorite = isFavorite
@@ -165,7 +165,10 @@ struct SavedConnection: Identifiable, Codable, Hashable {
 
     enum CodingKeys: String, CodingKey {
         case id, name, host, port, useSSL, useStartTLS, baseDN, bindDN, trustedCertSHA256, bookmarks, savedFilters, isFavorite, isReadOnly, allowsMCP
-        case trustedCACertificates, checksCertificateHostName
+        case trustedCACertificates, certificateHostNames
+        /// What a 1.4.2 beta saved instead of `certificateHostNames`:
+        /// false meant any name.
+        case checksCertificateHostName
         case chaseReferrals, timeoutSeconds, authentication, saslAuthID, saslRealm
         case clientCertificateBookmark, clientKeyBookmark
         case useSSHTunnel, sshHost, sshPort, sshUsername, sshAuthentication, sshPrivateKeyBookmark, sshHostKeySHA256
@@ -187,7 +190,10 @@ struct SavedConnection: Identifiable, Codable, Hashable {
         bindDN = try container.decode(String.self, forKey: .bindDN)
         trustedCertSHA256 = try container.decodeIfPresent(String.self, forKey: .trustedCertSHA256)
         trustedCACertificates = try container.decodeIfPresent([Data].self, forKey: .trustedCACertificates) ?? []
-        checksCertificateHostName = try container.decodeIfPresent(Bool.self, forKey: .checksCertificateHostName) ?? true
+        // A rule this version doesn't know (from a later one) is read as the
+        // strictest rather than failing the whole file.
+        certificateHostNames = (try? container.decodeIfPresent(CertificateHostNames.self, forKey: .certificateHostNames))
+            ?? ((try? container.decodeIfPresent(Bool.self, forKey: .checksCertificateHostName)) == false ? .any : .exact)
         bookmarks = try container.decodeIfPresent([String].self, forKey: .bookmarks) ?? []
         savedFilters = try container.decodeIfPresent([SavedLDAPFilter].self, forKey: .savedFilters) ?? []
         isFavorite = try container.decodeIfPresent(Bool.self, forKey: .isFavorite) ?? false
@@ -221,7 +227,7 @@ struct SavedConnection: Identifiable, Codable, Hashable {
         try container.encode(bindDN, forKey: .bindDN)
         try container.encodeIfPresent(trustedCertSHA256, forKey: .trustedCertSHA256)
         if !trustedCACertificates.isEmpty { try container.encode(trustedCACertificates, forKey: .trustedCACertificates) }
-        if !checksCertificateHostName { try container.encode(false, forKey: .checksCertificateHostName) }
+        if certificateHostNames != .exact { try container.encode(certificateHostNames, forKey: .certificateHostNames) }
         if !bookmarks.isEmpty { try container.encode(bookmarks, forKey: .bookmarks) }
         if !savedFilters.isEmpty { try container.encode(savedFilters, forKey: .savedFilters) }
         if isFavorite { try container.encode(true, forKey: .isFavorite) }
@@ -271,7 +277,7 @@ extension SavedConnection {
             sshPrivateKeyBookmark: sshPrivateKeyBookmark,
             sshHostKeySHA256: sshHostKeySHA256,
             trustedCACertificates: trustedCACertificates,
-            checksCertificateHostName: checksCertificateHostName
+            certificateHostNames: certificateHostNames
         )
     }
 }

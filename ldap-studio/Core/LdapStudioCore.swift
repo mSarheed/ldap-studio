@@ -61,6 +61,23 @@ nonisolated public enum LdapAuthenticationMethod: Int32, Hashable, Sendable {
     case simple = 0, external, gssapi, digestMD5
 }
 
+/// Which names a server's certificate may be issued to — see `LSHostNames`.
+/// Ordered from strictest to loosest.
+nonisolated public enum CertificateHostNames: String, Codable, Hashable, Sendable, Comparable {
+    /// Only the host name connected to.
+    case exact
+    /// That, or a server one level under it — a domain controller's own
+    /// name under an Active Directory domain name.
+    case subdomains
+    /// Any name.
+    case any
+
+    public static func < (lhs: Self, rhs: Self) -> Bool {
+        let order: [Self] = [.exact, .subdomains, .any]
+        return order.firstIndex(of: lhs)! < order.firstIndex(of: rhs)!
+    }
+}
+
 nonisolated public struct LDAPConnectionOptions: Hashable, Sendable {
     public var chaseReferrals: Bool
     public var timeoutSeconds: Int
@@ -80,8 +97,8 @@ nonisolated public struct LDAPConnectionOptions: Hashable, Sendable {
     /// Certificate authorities (DER) this connection trusts besides the
     /// bundled ones — see `ls_set_tls_trust`.
     public var trustedCACertificates: [Data]
-    /// Off accepts a certificate issued to another host name.
-    public var checksCertificateHostName: Bool
+    /// Which names the server's certificate may be issued to.
+    public var certificateHostNames: CertificateHostNames
 
     public init(chaseReferrals: Bool = false, timeoutSeconds: Int = 15,
                 authentication: LdapAuthenticationMethod = .simple,
@@ -91,7 +108,7 @@ nonisolated public struct LDAPConnectionOptions: Hashable, Sendable {
                 sshHost: String = "", sshPort: Int = 22, sshUsername: String = "",
                 sshUsesPrivateKey: Bool = false, sshPassword: String = "",
                 sshPrivateKeyBookmark: Data? = nil, sshHostKeySHA256: String? = nil,
-                trustedCACertificates: [Data] = [], checksCertificateHostName: Bool = true) {
+                trustedCACertificates: [Data] = [], certificateHostNames: CertificateHostNames = .exact) {
         self.chaseReferrals = chaseReferrals
         self.timeoutSeconds = timeoutSeconds
         self.authentication = authentication
@@ -108,7 +125,7 @@ nonisolated public struct LDAPConnectionOptions: Hashable, Sendable {
         self.sshPrivateKeyBookmark = sshPrivateKeyBookmark
         self.sshHostKeySHA256 = sshHostKeySHA256
         self.trustedCACertificates = trustedCACertificates
-        self.checksCertificateHostName = checksCertificateHostName
+        self.certificateHostNames = certificateHostNames
     }
 }
 
@@ -475,14 +492,19 @@ nonisolated private func withConnectionPolicy<T>(_ options: LDAPConnectionOption
         options.sshHostKeySHA256 ?? ""
     )
     setTLSTrust(trustedCACertificates: options.trustedCACertificates,
-                checksHostName: options.checksCertificateHostName)
+                hostNames: options.certificateHostNames)
     return work()
 }
 
-/// Pushes the certificate authorities a connection trusts (and whether
-/// the host name has to match) into the C core for the next connect.
-nonisolated private func setTLSTrust(trustedCACertificates: [Data], checksHostName: Bool) {
-    ls_set_tls_trust(PEM.encode(certificates: trustedCACertificates), checksHostName)
+/// Pushes the certificate authorities a connection trusts (and which names
+/// its certificate may be issued to) into the C core for the next connect.
+nonisolated private func setTLSTrust(trustedCACertificates: [Data], hostNames: CertificateHostNames) {
+    let rule: LSHostNames = switch hostNames {
+    case .exact: LS_HOST_NAMES_EXACT
+    case .subdomains: LS_HOST_NAMES_SUBDOMAINS
+    case .any: LS_HOST_NAMES_ANY
+    }
+    ls_set_tls_trust(PEM.encode(certificates: trustedCACertificates), rule)
 }
 
 /// DER certificates to and from PEM, the form the C core speaks.
@@ -580,6 +602,9 @@ public struct LdapCertificate: Sendable, Equatable {
     public let untrustedIssuer: Bool
     /// When it doesn't: why, in words.
     public let chainProblem: String
+    /// Issued to a server one level under the host name rather than the
+    /// host itself — see `CertificateHostNames.subdomains`.
+    public let issuedToSubdomain: Bool
 }
 
 /// Reads the server's certificate without verifying it, through the SSH
@@ -613,7 +638,8 @@ nonisolated private func probeCertificateNow(host: String, port: UInt16, useSsl:
         chain: PEM.decodeCertificates(str(info.chain_pem)),
         chainTrusted: info.chain_trusted,
         untrustedIssuer: info.untrusted_issuer,
-        chainProblem: str(info.chain_problem)
+        chainProblem: str(info.chain_problem),
+        issuedToSubdomain: info.subdomain_match
     ))
 }
 

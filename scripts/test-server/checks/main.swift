@@ -42,28 +42,35 @@ func connection(_ bind: String, _ pw: String, base: String = "dc=example,dc=com"
     check(probe.presentedAuthorities.map(\.der) == [issuing] && probe.presentedAuthorities.first?.name == "LDAP Studio Test Issuing CA",
           "probe offers the issuing CA to trust")
     check(probe.problem(for: c) == .untrustedIssuer, "problem: untrusted issuer")
+    var pinnedToIt = c
+    pinnedToIt.trustedCertSHA256 = probe.sha256.uppercased()
+    check(probe.problem(for: pinnedToIt) == .none, "the pinned certificate itself is no problem")
     let brokenChain = LdapCertificate(subject: "", issuer: "", sha256: "", notBefore: "", notAfter: "",
                                       selfSigned: false, expired: false, hostMismatch: false, chain: [],
                                       chainTrusted: false, untrustedIssuer: false,
-                                      chainProblem: "a certificate in its chain has expired")
+                                      chainProblem: "a certificate in its chain has expired", issuedToSubdomain: false)
     check(brokenChain.problem(for: c) == .invalidChain("a certificate in its chain has expired"),
           "problem: a chain that fails otherwise isn't offered another CA")
 
     c.trustedCertSHA256 = probe.sha256
-    c.trust(.certificateAuthority(issuing, acceptingOtherHostNames: false))
-    check(c.trustedCACertificates == [issuing] && c.trustedCertSHA256 == nil && c.checksCertificateHostName,
+    c.trust(.certificateAuthority(issuing, hostNames: .exact))
+    check(c.trustedCACertificates == [issuing] && c.trustedCertSHA256 == nil && c.certificateHostNames == .exact,
           "trusting the CA replaces the certificate trusted on its own")
     let otherName = await reads(c)
     check(otherName?.contains("different host name") == true, "trusted CA, certificate for another name refused: \(otherName ?? "connected")")
     let reprobe = try? await probeCertificate(host: "127.0.0.1", port: 3636, useSsl: true, startTLS: false,
                                               options: c.ldapOptions)
     check(reprobe?.chainTrusted == true && reprobe?.problem(for: c) == .otherHostName, "probe with the CA trusted: only the name is wrong")
-    c.trust(.otherHostNames)
+    check(reprobe?.hostNamesNeeded == .any, "an IP address has no servers under it, so it takes any name")
+    c.trust(.hostNames(.any))
     check(await reads(c) == nil, "trusted CA, host-name check off: connects")
 
     var byName = ldaps("localhost")
-    byName.trust(.certificateAuthority(issuing, acceptingOtherHostNames: false))
+    byName.trust(.certificateAuthority(issuing, hostNames: .exact))
     check(await reads(byName) == nil, "LDAPS, issuing CA trusted, matching name: connects")
+    var rootDot = byName
+    rootDot.host = "localhost."
+    check(await reads(rootDot) == nil, "a host name ending in the root dot still matches its certificate")
     byName.useSSL = false; byName.port = 3389; byName.useStartTLS = true
     check(await reads(byName) == nil, "StartTLS, issuing CA trusted: connects")
     byName.trustedCACertificates = [root]
@@ -77,9 +84,16 @@ func connection(_ bind: String, _ pw: String, base: String = "dc=example,dc=com"
 
     // Saved and loaded again, and older files without the new keys.
     let saved = try! JSONDecoder().decode(SavedConnection.self, from: JSONEncoder().encode(c))
-    check(saved.trustedCACertificates == [issuing] && !saved.checksCertificateHostName, "trusted CAs survive saving")
+    check(saved.trustedCACertificates == [issuing] && saved.certificateHostNames == .any, "trusted CAs survive saving")
     let old = try! JSONDecoder().decode(SavedConnection.self, from: Data(#"{"id":"\#(UUID())","name":"o","host":"h","port":636,"useSSL":true,"bindDN":""}"#.utf8))
-    check(old.trustedCACertificates.isEmpty && old.checksCertificateHostName, "older saved connections load with the defaults")
+    check(old.trustedCACertificates.isEmpty && old.certificateHostNames == .exact, "older saved connections load with the defaults")
+    let beta = try! JSONDecoder().decode(SavedConnection.self, from: Data(#"{"id":"\#(UUID())","name":"b","host":"h","port":636,"useSSL":true,"bindDN":"","checksCertificateHostName":false}"#.utf8))
+    check(beta.certificateHostNames == .any, "a beta's host-name check turned off still accepts any name")
+    let later = try? JSONDecoder().decode(SavedConnection.self, from: Data(#"{"id":"\#(UUID())","name":"l","host":"h","port":636,"useSSL":true,"bindDN":"","certificateHostNames":"someday"}"#.utf8))
+    check(later?.certificateHostNames == .exact, "a host-name rule from a later version loads as the strictest")
+    var widened = c
+    widened.trust(.hostNames(.subdomains))
+    check(widened.certificateHostNames == .any, "trusting never narrows the host names accepted")
 }
 
 @MainActor func run() async {
