@@ -101,7 +101,8 @@ func count(_ value: JSONValue?, _ key: String) -> Int {
     let small = connection("Small", "cn=manager,dc=small,dc=test", "manager", base: "dc=small,dc=test")
     var connections = [reader, manager, hidden, small]
 
-    let tools = MCPTools(connections: { connections }, extraHidden: { ["mail"] })
+    var extraHidden = ["mail"]
+    let tools = MCPTools(connections: { connections }, extraHidden: { extraHidden })
     let endpoint = MCPEndpoint(tools: tools, version: "test")
     let ready = AsyncStream<MCPHTTPServer.State>.makeStream()
     let server = MCPHTTPServer(port: port, token: token,
@@ -143,8 +144,19 @@ func count(_ value: JSONValue?, _ key: String) -> Int {
     check(await post("", method: "GET")?.status == 405, "GET → 405 (no SSE stream)")
     check(await post("", method: "DELETE")?.status == 405, "DELETE → 405")
     check(await post(initialize, contentType: "text/plain")?.status == 415, "non-JSON content type → 415")
-    let chunked = "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\nAuthorization: Bearer \(token)\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n"
-    check(await raw(Data(chunked.utf8))?.status == 411, "chunked body → 411")
+    func chunkedRequest(_ body: String, extra: String = "") -> Data {
+        let first = String(body.prefix(10)), rest = String(body.dropFirst(10))
+        let chunks = "\(String(first.utf8.count, radix: 16));ext=1\r\n\(first)\r\n\(String(rest.utf8.count, radix: 16))\r\n\(rest)\r\n0\r\nX-Trailer: 1\r\n\r\n"
+        return Data("POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\nAuthorization: Bearer \(token)\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\(extra)\r\n\(chunks)".utf8)
+    }
+    let chunkedReply = await raw(chunkedRequest(initialize))
+    check(chunkedReply?.status == 200 && String(decoding: chunkedReply?.body ?? Data(), as: UTF8.self).contains("protocolVersion"),
+          "chunked body (as .NET clients send) is decoded")
+    check(await raw(chunkedRequest(initialize, extra: "Content-Length: 5\r\n"))?.status == 400, "chunked and Content-Length together → 400")
+    let badChunk = "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\nAuthorization: Bearer \(token)\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n-5\r\nhello\r\n0\r\n\r\n"
+    check(await raw(Data(badChunk.utf8))?.status == 400, "malformed chunk size → 400")
+    let hugeChunk = "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\nAuthorization: Bearer \(token)\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n\(String(MCPHTTPServer.maxBodyBytes + 1, radix: 16))\r\n"
+    check(await raw(Data(hugeChunk.utf8))?.status == 413, "chunk past 1 MB → 413")
     let huge = "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\nAuthorization: Bearer \(token)\r\nContent-Type: application/json\r\nContent-Length: \(MCPHTTPServer.maxBodyBytes + 1)\r\n\r\n"
     check(await raw(Data(huge.utf8))?.status == 413, "body over 1 MB → 413, before it's sent")
     let bigHeader = "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\nX-Big: \(String(repeating: "a", count: 20_000))\r\n\r\n"
@@ -242,7 +254,9 @@ func count(_ value: JSONValue?, _ key: String) -> Int {
     for (filter, label) in [("(userPassword=password)", "equality"), ("(&(uid=user000000)(userpassword=p*))", "nested, lowercased"),
                             ("(userPassword;binary=*)", "with options"), ("(2.5.4.35=*)", "by OID"),
                             ("(:caseExactMatch:=password)", "any-attribute extensible match"),
-                            ("(mail=user*)", "user-hidden attribute"), ("uid=user000000", "unparenthesized")] {
+                            ("(mail=user*)", "user-hidden attribute"), ("(rfc822Mailbox=user*)", "alias of a hidden attribute"),
+                            ("(anr=user)", "ambiguous name resolution"), ("(notAnAttribute=x)", "attribute the schema doesn't have"),
+                            ("uid=user000000", "unparenthesized")] {
         let result = await tool("search", ["connection": "Manager", "filter": .string(filter)])
         check(result?.isError == true, "filter refused (\(label)): \(result?.text.prefix(90) ?? "nil")")
     }
@@ -261,10 +275,33 @@ func count(_ value: JSONValue?, _ key: String) -> Int {
     let restricted = await tool("list_children", ["connection": "Reader", "dn": "ou=Restricted,dc=example,dc=com"])
     check(restricted?.isError == true, "a branch the bind can't search reports the server's refusal")
 
+    // Hiding a subtype also rules out filtering on its supertype, which
+    // matches the subtype's values.
+    extraHidden = ["sn", "objectClass"]
+    for filter in ["(sn=000000)", "(name=000000)", "(2.5.4.41=000000)"] {
+        let result = await tool("search", ["connection": "Reader", "base_dn": "ou=People,dc=example,dc=com", "filter": .string(filter)])
+        check(result?.isError == true, "filter refused when sn is hidden: \(filter)")
+    }
+    let cnStillWorks = await tool("search", ["connection": "Reader", "base_dn": "ou=People,dc=example,dc=com", "filter": "(cn=User 000000)"])
+    check(count(cnStillWorks?.json, "entries") == 1, "a sibling subtype (cn) can still be filtered on")
+    let hiddenClasses = await tool("list_children", ["connection": "Reader", "dn": "ou=People,dc=example,dc=com", "limit": 3])
+    check(count(hiddenClasses?.json, "children") == 3 && hiddenClasses?.text.contains("object_classes") == false
+          && hiddenClasses?.text.contains("inetOrgPerson") == false, "list_children leaves out a hidden objectClass")
+    extraHidden = ["mail"]
+
+    // Without a schema, nothing but objectClass can be named.
+    let blind = MCPAttributePolicy(schema: nil)
+    check((try? blind.check(filter: "(&(objectClass=person)(!(objectClass=computer)))")) != nil, "no schema: objectClass filters still work")
+    check((try? blind.check(filter: "(cn=Alice)")) == nil && (try? blind.check("cn")) == nil, "no schema: other names are refused")
+    let emptySchema = MCPAttributePolicy(schema: LdapSchema(objectClasses: [], attributeTypes: []))
+    check(!emptySchema.knowsSchema && (try? emptySchema.check("2.5.4.3")) == nil, "an empty schema counts as none")
+
     let top = await tool("list_children", ["connection": "Reader"])
     check(count(top?.json, "children") == 8, "list_children of the base DN: 8 children")
     let contexts = await tool("list_children", ["connection": "Reader", "dn": ""])
     check(contexts?.text.contains("dc=example,dc=com") == true, "list_children of \"\" lists naming contexts")
+    let oneContext = await tool("list_children", ["connection": "Reader", "dn": "", "limit": 1])
+    check(count(oneContext?.json, "children") == 1 && oneContext?.json?["complete"] == false, "naming contexts past the limit aren't reported complete")
     let someChildren = await tool("list_children", ["connection": "Reader", "dn": "ou=People,dc=example,dc=com", "limit": 10])
     check(count(someChildren?.json, "children") == 10 && someChildren?.json?["complete"] == false, "list_children respects its limit")
 
@@ -282,6 +319,22 @@ func count(_ value: JSONValue?, _ key: String) -> Int {
     _ = await rpc("tools/call", ["name": "search", "arguments": ["connection": "Manager", "base_dn": "ou=Empty,dc=example,dc=com", "filter": "(objectClass=*)", "scope": "base", "attributes": ["description"], "add": ["description": "x"]]])
     let after = await tool("get_entry", ["connection": "Manager", "dn": "ou=Empty,dc=example,dc=com"])
     check(before?.text == after?.text, "unknown arguments don't change anything")
+
+    // A queued call that's cancelled gives up its place without running.
+    let limiter = MCPCallLimiter(limit: 1)
+    try? await limiter.acquire()
+    let queued = Task { @MainActor in
+        do { try await limiter.acquire(); return "acquired" } catch { return "cancelled" }
+    }
+    try? await Task.sleep(for: .milliseconds(50))
+    queued.cancel()
+    check(await queued.value == "cancelled", "a cancelled waiter stops waiting")
+    limiter.release()
+    let next = Task { @MainActor in
+        do { try await limiter.acquire(); return true } catch { return false }
+    }
+    try? await Task.sleep(for: .milliseconds(50))
+    check(await next.value, "its slot isn't lost")
 
     // The Operation Log shows the agent's reads as such.
     check(OperationLog.shared.entries.contains { $0.summary.hasPrefix("[MCP] search") }, "Operation Log tags MCP reads")

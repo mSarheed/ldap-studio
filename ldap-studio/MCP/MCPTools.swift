@@ -36,15 +36,9 @@ final class MCPTools {
     nonisolated static let maxValueLength = 2000
     nonisolated static let maxInputLength = 4096
     nonisolated static let maxRequestedAttributes = 100
-    /// A call still running after this long is cancelled.
+    /// A call still running after this long is answered with an error and
+    /// cancelled.
     nonisolated static let callTimeout: Duration = .seconds(90)
-    /// Calls running at once; the rest wait. Keeps an agent that fires off
-    /// many requests from taking every pooled connection the app's own
-    /// windows use.
-    nonisolated static let maxConcurrentCalls = 3
-
-    private var running = 0
-    private var waiting: [CheckedContinuation<Void, Never>] = []
 
     /// When reading each connection's schema last failed — it isn't asked
     /// for again on every call for a while.
@@ -153,15 +147,26 @@ final class MCPTools {
     /// Runs tool `name`. Returns the result's text and whether it's an
     /// error; `name` must be one of `toolNames`.
     func call(_ name: String, arguments: [String: JSONValue]) async -> (text: String, isError: Bool) {
-        await acquireSlot()
-        defer { releaseSlot() }
         do {
             let result = try await withTimeout(Self.callTimeout) {
-                try await OperationOrigin.$current.withValue("MCP") {
+                // The slot is held for as long as the work really runs —
+                // past a timeout too, while a call into the C core that
+                // can't be interrupted finishes.
+                try await MCPCallLimiter.shared.acquire()
+                defer { MCPCallLimiter.shared.release() }
+                try Task.checkCancellation()
+                return try await OperationOrigin.$current.withValue("MCP") {
                     try await self.run(name, Arguments(arguments))
                 }
             }
-            return (result.encodedString, false)
+            let text = result.encodedString
+            // Entries and searches keep to the limit as they're built; this
+            // catches anything else that grew past it (JSON escaping, a huge
+            // schema).
+            guard text.utf8.count <= Self.maxResultBytes + 16 * 1024 else {
+                return ("The result is too large to return (\(text.utf8.count / 1024) KB). Ask for fewer attributes, or narrow the request.", true)
+            }
+            return (text, false)
         } catch is TimeoutError {
             return ("Stopped after \(Self.callTimeout.components.seconds) seconds without finishing. Narrow the search (a more specific filter or base_dn).", true)
         } catch is CancellationError {
@@ -279,26 +284,38 @@ final class MCPTools {
     }
 
     private func children(_ args: Arguments) async throws -> JSONValue {
-        let (directory, _) = try await open(args)
+        let (directory, policy) = try await open(args)
         let limit = try args.int("limit", default: Self.defaultChildLimit, in: 1...Self.maxChildLimit)
         let dn = try args.string("dn") ?? directory.connection.baseDN
         try checkLength(dn, "dn")
+
+        // The tree's own attributes, minus any the user hid ("1.1" asks
+        // for none at all — an empty list would mean every attribute).
+        let visible = TreeRow.treeAttributes.filter { !policy.isHidden($0) }
+        let attributes = visible.isEmpty ? ["1.1"] : visible
+        func row(_ entry: LdapEntry) -> TreeRow {
+            TreeRow(LdapEntry(dn: entry.dn, name: entry.name,
+                              attributes: entry.attributes.filter { !policy.isHidden($0.name) }))
+        }
+        let showsObjectClasses = !policy.isHidden("objectClass")
 
         var rows: [TreeRow] = []
         var isComplete = true
         if dn.isEmpty {
             let dse = try await directory.entry(dn: "", attributes: ["namingContexts"])
-            for context in (dse?.values("namingContexts") ?? []).prefix(limit) {
-                if let entry = try await directory.entry(dn: context, attributes: TreeRow.treeAttributes) {
-                    rows.append(TreeRow(entry))
+            let contexts = dse?.values("namingContexts") ?? []
+            for context in contexts.prefix(limit) {
+                if let entry = try await directory.entry(dn: context, attributes: attributes) {
+                    rows.append(row(entry))
                 }
             }
+            isComplete = contexts.count <= limit
         } else {
             let outcome = try await directory.search(LdapSearchRequest(
-                baseDn: dn, scope: .oneLevel, attributes: TreeRow.treeAttributes,
+                baseDn: dn, scope: .oneLevel, attributes: attributes,
                 limit: limit, pageSize: min(limit, 500)
             )) { page, _ in
-                rows += page.map(TreeRow.init)
+                rows += page.map(row)
                 return true
             }
             isComplete = outcome.isComplete
@@ -310,11 +327,12 @@ final class MCPTools {
             "count": .int(rows.count),
             "complete": .bool(isComplete),
             "children": .array(rows.map { row in
-                [
+                var child: [String: JSONValue] = [
                     "dn": .string(row.dn),
-                    "object_classes": JSONValue(row.objectClasses),
                     "has_children": .bool(row.mayHaveChildren),
                 ]
+                if showsObjectClasses { child["object_classes"] = JSONValue(row.objectClasses) }
+                return .object(child)
             }),
         ]
         if !isComplete {
@@ -394,9 +412,9 @@ final class MCPTools {
     // MARK: Helpers
 
     /// The shared connection the call names, and what it may see. The
-    /// schema is read (once per session) to learn the hidden attributes'
-    /// aliases and OIDs; a server that won't give it out still works,
-    /// with OIDs refused.
+    /// schema is read (once per session) to resolve the attribute names an
+    /// agent uses; a server that won't give it out still works, but its
+    /// filters may only test objectClass (see MCPAttributePolicy).
     private func open(_ args: Arguments) async throws -> (ReadOnlyDirectory, MCPAttributePolicy) {
         guard let name = try args.string("connection"), !name.isEmpty else {
             throw ToolError("connection is required — call list_connections for the names.")
@@ -453,28 +471,37 @@ final class MCPTools {
     /// One entry as the agent sees it: hidden attributes dropped (but
     /// named), binary values described rather than dumped, and long
     /// values and attributes cut short.
+    /// Values that would take the entry past `maxResultBytes` are left
+    /// out (and counted), so one entry with huge multi-valued attributes
+    /// can't swamp the agent either.
     private func render(_ entry: LdapEntry, policy: MCPAttributePolicy) -> JSONValue {
-        var order: [String] = []
         var values: [String: [String]] = [:]
         var totals: [String: Int] = [:]
         var hidden: [String] = []
+        var bytes = entry.dn.utf8.count + 128
         for attribute in entry.attributes {
             if policy.isHidden(attribute.name) {
                 if !hidden.contains(attribute.name) { hidden.append(attribute.name) }
                 continue
             }
-            if values[attribute.name] == nil { order.append(attribute.name) }
             totals[attribute.name, default: 0] += 1
-            guard totals[attribute.name]! <= Self.maxValuesPerAttribute else { continue }
-            values[attribute.name, default: []].append(Self.displayValue(attribute))
+            guard values[attribute.name, default: []].count < Self.maxValuesPerAttribute else { continue }
+            let value = Self.displayValue(attribute)
+            let cost = value.utf8.count + 4 + (values[attribute.name] == nil ? attribute.name.utf8.count + 8 : 0)
+            guard bytes + cost <= Self.maxResultBytes else { continue }
+            bytes += cost
+            values[attribute.name, default: []].append(value)
         }
         var json: [String: JSONValue] = [
             "dn": .string(entry.dn),
             "attributes": .object(values.mapValues { JSONValue($0) }),
         ]
-        let cut = totals.filter { $0.value > Self.maxValuesPerAttribute }
-        if !cut.isEmpty {
-            json["values_not_shown"] = .object(cut.mapValues { .int($0 - Self.maxValuesPerAttribute) })
+        let notShown = totals.reduce(into: [String: JSONValue]()) { result, item in
+            let missing = item.value - (values[item.key]?.count ?? 0)
+            if missing > 0 { result[item.key] = .int(missing) }
+        }
+        if !notShown.isEmpty {
+            json["values_not_shown"] = .object(notShown)
         }
         if !hidden.isEmpty {
             json["hidden_attributes"] = JSONValue(hidden)
@@ -491,23 +518,6 @@ final class MCPTools {
         return String(attribute.value.prefix(maxValueLength)) + "… (\(attribute.value.count - maxValueLength) more characters)"
     }
 
-    // MARK: Concurrency
-
-    private func acquireSlot() async {
-        if running < Self.maxConcurrentCalls {
-            running += 1
-            return
-        }
-        await withCheckedContinuation { waiting.append($0) }
-    }
-
-    private func releaseSlot() {
-        if waiting.isEmpty {
-            running -= 1
-        } else {
-            waiting.removeFirst().resume()
-        }
-    }
 }
 
 // MARK: - Support
@@ -580,20 +590,98 @@ private struct ResultCollector {
     }
 }
 
+/// Tool calls running at once, across every server the app has started
+/// (one stopped mid-call still counts until its calls finish); the rest
+/// wait their turn. Keeps agents that fire off many requests from taking
+/// every pooled connection the app's own windows use.
+@MainActor
+final class MCPCallLimiter {
+    static let shared = MCPCallLimiter(limit: 3)
+
+    private let limit: Int
+    private var running = 0
+    private var waiting: [(id: UUID, continuation: CheckedContinuation<Void, Error>)] = []
+
+    init(limit: Int) {
+        self.limit = limit
+    }
+
+    /// Takes a slot, waiting for one if need be. Throws if the task is
+    /// cancelled first; then there's nothing to release.
+    func acquire() async throws {
+        try Task.checkCancellation()
+        if running < limit {
+            running += 1
+            return
+        }
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                if Task.isCancelled {
+                    continuation.resume(throwing: CancellationError())
+                } else {
+                    self.waiting.append((id: id, continuation: continuation))
+                }
+            }
+        } onCancel: {
+            Task { @MainActor in self.giveUp(id) }
+        }
+    }
+
+    /// Hands the slot straight to the next waiter, if there is one.
+    func release() {
+        if waiting.isEmpty {
+            running -= 1
+        } else {
+            waiting.removeFirst().continuation.resume()
+        }
+    }
+
+    private func giveUp(_ id: UUID) {
+        guard let index = waiting.firstIndex(where: { $0.id == id }) else { return }
+        waiting.remove(at: index).continuation.resume(throwing: CancellationError())
+    }
+}
+
 nonisolated private struct TimeoutError: Error {}
 
-/// Runs `work`, cancelling it if it hasn't finished within `limit`.
+/// Runs `work` and returns its result, or throws `TimeoutError` once
+/// `limit` has passed (or `CancellationError` once the caller is
+/// cancelled) — without waiting for `work` to notice it's been cancelled.
+/// A blocking call into the C core can't be interrupted, so `work` may
+/// finish some time later; its result is then dropped.
 @MainActor
 private func withTimeout<T: Sendable>(_ limit: Duration,
                                       _ work: @escaping @MainActor () async throws -> T) async throws -> T {
-    try await withThrowingTaskGroup(of: T.self) { group in
-        group.addTask { @MainActor in try await work() }
-        group.addTask {
-            try await Task.sleep(for: limit)
-            throw TimeoutError()
+    let worker = Task { @MainActor in try await work() }
+    let outcome = Outcome<T>()
+    return try await withTaskCancellationHandler {
+        try await withCheckedThrowingContinuation { continuation in
+            outcome.continuation = continuation
+            let timer = Task { @MainActor in
+                try await Task.sleep(for: limit)
+                worker.cancel()
+                outcome.finish(.failure(TimeoutError()))
+            }
+            Task { @MainActor in
+                let result = await worker.result
+                timer.cancel()
+                outcome.finish(result)
+            }
         }
-        defer { group.cancelAll() }
-        guard let result = try await group.next() else { throw CancellationError() }
-        return result
+    } onCancel: {
+        worker.cancel()
+        Task { @MainActor in outcome.finish(.failure(CancellationError())) }
+    }
+}
+
+/// Resumes a continuation once — with whichever outcome comes first.
+@MainActor
+private final class Outcome<T: Sendable> {
+    var continuation: CheckedContinuation<T, Error>?
+
+    func finish(_ result: Result<T, Error>) {
+        continuation?.resume(with: result)
+        continuation = nil
     }
 }

@@ -259,6 +259,8 @@ nonisolated private final class HTTPConnection: @unchecked Sendable {
     }
 
     private func parse() -> Parse {
+        // Chunked framing can take a few times the body's size.
+        guard buffer.count <= MCPHTTPServer.maxHeaderBytes + 2 * MCPHTTPServer.maxBodyBytes else { return .invalid(413) }
         let separator = Data("\r\n\r\n".utf8)
         guard let headerEnd = buffer.range(of: separator) else {
             return buffer.count > MCPHTTPServer.maxHeaderBytes ? .invalid(431) : .incomplete
@@ -279,27 +281,90 @@ nonisolated private final class HTTPConnection: @unchecked Sendable {
             guard !name.isEmpty, !name.contains(" "), !name.contains("\t") else { return .invalid(400) }
             headers[name, default: []].append(line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces))
         }
-        if headers["transfer-encoding"] != nil { return .invalid(411) }
-        var length = 0
-        if let lengths = headers["content-length"] {
-            guard Set(lengths).count == 1, let value = Int(lengths[0]), value >= 0 else { return .invalid(400) }
-            length = value
-        }
-        guard length <= MCPHTTPServer.maxBodyBytes else { return .invalid(413) }
-
         let bodyStart = headerEnd.upperBound
-        guard buffer.endIndex - bodyStart >= length else {
-            // curl and others wait for this before sending a large body.
-            if !sentContinue, headers["expect"]?.first?.lowercased() == "100-continue" {
-                sentContinue = true
-                connection.send(content: Data("HTTP/1.1 100 Continue\r\n\r\n".utf8), completion: .idempotent)
+        let body: Data
+        if let encodings = headers["transfer-encoding"] {
+            // Chunked, and nothing else: a request framed two ways at once
+            // is how request smuggling starts.
+            guard headers["content-length"] == nil, encodings.count == 1,
+                  encodings[0].lowercased() == "chunked" else { return .invalid(400) }
+            switch Self.decodeChunked(buffer[bodyStart...]) {
+            case .incomplete:
+                sendContinueIfExpected(headers)
+                return .incomplete
+            case let .invalid(status):
+                return .invalid(status)
+            case let .complete(decoded):
+                body = decoded
             }
-            return .incomplete
+        } else {
+            var length = 0
+            if let lengths = headers["content-length"] {
+                guard Set(lengths).count == 1, lengths[0].allSatisfy(\.isASCII), lengths[0].allSatisfy(\.isNumber),
+                      let value = Int(lengths[0]) else { return .invalid(400) }
+                length = value
+            }
+            guard length <= MCPHTTPServer.maxBodyBytes else { return .invalid(413) }
+            guard buffer.endIndex - bodyStart >= length else {
+                sendContinueIfExpected(headers)
+                return .incomplete
+            }
+            body = Data(buffer[bodyStart..<bodyStart + length])
         }
         return .complete(MCPHTTPServer.Request(
             method: String(requestLine[0]), target: String(requestLine[1]),
-            headers: headers, body: buffer[bodyStart..<bodyStart + length]
+            headers: headers, body: body
         ))
+    }
+
+    /// curl and others wait for this before sending a large body.
+    private func sendContinueIfExpected(_ headers: [String: [String]]) {
+        guard !sentContinue, headers["expect"]?.first?.lowercased() == "100-continue" else { return }
+        sentContinue = true
+        connection.send(content: Data("HTTP/1.1 100 Continue\r\n\r\n".utf8), completion: .idempotent)
+    }
+
+    private enum Chunked {
+        case incomplete
+        case invalid(Int)
+        case complete(Data)
+    }
+
+    /// A chunked body (RFC 9112 §7.1) — what .NET's HttpClient, among
+    /// others, sends when it doesn't know the length up front. Chunk
+    /// extensions and trailers are read past and ignored.
+    private static func decodeChunked(_ data: Data.SubSequence) -> Chunked {
+        let crlf = Data("\r\n".utf8)
+        let maxLine = 1024
+        var body = Data()
+        var index = data.startIndex
+        while true {
+            guard let lineEnd = data[index...].range(of: crlf) else {
+                return data.endIndex - index > maxLine ? .invalid(400) : .incomplete
+            }
+            guard lineEnd.lowerBound - index <= maxLine,
+                  let line = String(data: data[index..<lineEnd.lowerBound], encoding: .ascii) else { return .invalid(400) }
+            let sizeText = line.prefix { $0 != ";" }.trimmingCharacters(in: .whitespaces)
+            guard !sizeText.isEmpty, sizeText.count <= 8, sizeText.allSatisfy(\.isHexDigit),
+                  let size = Int(sizeText, radix: 16) else { return .invalid(400) }
+            index = lineEnd.upperBound
+            if size == 0 {
+                // Trailer lines, then an empty line.
+                while true {
+                    guard let end = data[index...].range(of: crlf) else {
+                        return data.endIndex - index > MCPHTTPServer.maxHeaderBytes ? .invalid(431) : .incomplete
+                    }
+                    if end.lowerBound == index { return .complete(body) }
+                    index = end.upperBound
+                }
+            }
+            guard body.count + size <= MCPHTTPServer.maxBodyBytes else { return .invalid(413) }
+            guard data.endIndex - index >= size + 2 else { return .incomplete }
+            body.append(data[index..<index + size])
+            index += size
+            guard data[index..<index + 2] == crlf else { return .invalid(400) }
+            index += 2
+        }
     }
 
     private func dispatch(_ request: MCPHTTPServer.Request) {
@@ -353,7 +418,6 @@ nonisolated private final class HTTPConnection: @unchecked Sendable {
         case 404: "Not Found"
         case 405: "Method Not Allowed"
         case 408: "Request Timeout"
-        case 411: "Length Required"
         case 413: "Content Too Large"
         case 415: "Unsupported Media Type"
         case 431: "Request Header Fields Too Large"

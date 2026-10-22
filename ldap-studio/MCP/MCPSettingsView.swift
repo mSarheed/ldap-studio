@@ -77,7 +77,7 @@ struct MCPSettingsView: View {
             } header: {
                 Text("Connect an Agent")
             } footer: {
-                Text("The copied setup includes your access token. Keep it out of files you share or commit. Any agent not listed works too: point it at the server URL and send the header Authorization: Bearer <token>.")
+                Text("The copied setup includes your access token. Keep it out of files you share or commit. After generating a new token or changing the port, copy the setup again and replace the old one. Any agent not listed works too: point it at the server URL and send the header Authorization: Bearer <token>.")
                     .settingsFootnote()
             }
 
@@ -231,7 +231,7 @@ enum AgentClient: String, CaseIterable, Identifiable {
 
     var instructions: String {
         switch self {
-        case .claudeCode: "Run this in Terminal:"
+        case .claudeCode: "Run this in Terminal. It replaces any earlier LDAP Studio setup:"
         case .codex: "Add this to ~/.codex/config.toml:"
         case .cursor: "Add this to ~/.cursor/mcp.json (or Cursor Settings → MCP → Add):"
         case .vsCode: "Run “MCP: Open User Configuration” from the Command Palette and add:"
@@ -251,7 +251,10 @@ enum AgentClient: String, CaseIterable, Identifiable {
     func setup(url: String, token: String) -> String {
         switch self {
         case .claudeCode:
-            return #"claude mcp add --transport http --scope user ldap-studio \#(url) --header "Authorization: Bearer \#(token)""#
+            return #"""
+                claude mcp remove --scope user ldap-studio 2>/dev/null
+                claude mcp add --transport http --scope user ldap-studio \#(url) --header "Authorization: Bearer \#(token)"
+                """#
         case .codex:
             return """
                 [mcp_servers.ldap-studio]

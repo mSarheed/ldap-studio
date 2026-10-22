@@ -63,7 +63,7 @@ LDAP Studio has to be running for agents to connect. Agents get six tools: `list
 
 - Connections you haven't shared.
 - Connection passwords. They stay in your Keychain.
-- Attributes that hold secrets, such as `userPassword`, `unicodePwd`, LAPS passwords, BitLocker recovery keys, Kerberos keys and Samba hashes, plus any attributes you add under **Also hide**. These are left out of results, can't be requested, and can't appear in a search filter, so an agent can't guess a value one filter at a time.
+- Attributes that hold secrets, such as `userPassword`, `unicodePwd`, LAPS passwords, BitLocker recovery keys, Kerberos keys, Samba hashes and replication credentials in server configuration, plus any attributes you add under **Also hide**. These are left out of results, can't be requested, and can't appear in a search filter, so an agent can't guess a value one filter at a time. This also covers their aliases, OIDs and subtypes, and filters on their supertypes. Attribute names are checked against the server's schema; if LDAP Studio can't read the schema, filters can only test `objectClass`.
 - Binary values. They're described by size only.
 
 Results are capped in size, so a broad search can't flood an agent's context. Agents' reads show up in the Operation Log marked `[MCP]`.

@@ -511,7 +511,13 @@ struct NewConnectionSheet: View {
     // MARK: Actions
 
     private func save() {
-        let connection = builtConnection
+        var connection = builtConnection
+        // Sharing with agents can also be switched in Settings while this
+        // sheet is open. Unless it was changed here, keep what's stored, so
+        // saving an unrelated edit never undoes turning sharing off.
+        if let existingConnection, allowsMCP == existingConnection.allowsMCP {
+            connection.allowsMCP = store.latest(existingConnection).allowsMCP
+        }
         KeychainService.savePassword(password, for: connection.id)
         KeychainService.saveSSHPassword(sshPassword, for: connection.id)
         if existingConnection == nil {

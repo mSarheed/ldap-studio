@@ -9,11 +9,16 @@
 //  for, and can't appear in a search filter either — a filter like
 //  (ms-Mcs-AdmPwd=a*) would otherwise leak a value one guess at a time.
 //
+//  Names are checked against the server's schema, so an alias or OID of a
+//  hidden attribute is caught too. Without a schema to check against,
+//  nothing an agent names is accepted except objectClass: the policy
+//  fails closed.
+//
 
 import Foundation
 
 nonisolated struct MCPAttributePolicy: Sendable {
-    /// Secrets on the common directory servers, lowercased.
+    /// Secrets on the common directory servers.
     static let alwaysHidden: [String] = [
         // Standard
         "userPassword", "authPassword", "userPKCS12", "pwdHistory",
@@ -26,50 +31,84 @@ nonisolated struct MCPAttributePolicy: Sendable {
         "msPKIAccountCredentials", "msPKIDPAPIMasterKeys", "msSFU30Password", "unixUserPassword",
         "trustAuthIncoming", "trustAuthOutgoing", "initialAuthIncoming", "initialAuthOutgoing",
         "currentValue", "priorValue",
-        // Samba, Kerberos, FreeIPA, 389 DS, OpenLDAP config, OATH, RADIUS
+        // OpenLDAP configuration (cn=config): root and replication/proxy
+        // bind credentials
+        "olcRootPW", "olcSyncrepl", "olcDbACLPasswd", "olcDbIDAssertBind",
+        // 389 Directory Server
+        "nsslapd-rootpw", "nsds5ReplicaCredentials", "nsDS5ReplicaBootstrapCredentials",
+        "nsMultiplexorCredentials", "nsSymmetricKey",
+        // Samba, Kerberos, FreeIPA, OATH, RADIUS
         "sambaNTPassword", "sambaLMPassword", "sambaPasswordHistory",
         "krbPrincipalKey", "krbMKey", "krb5Key", "ipaNTHash", "ipatokenOTPkey",
-        "nsSymmetricKey", "nsds5ReplicaCredentials", "nsslapd-rootpw", "olcRootPW",
         "oathSecret", "radiusTunnelPassword",
     ]
 
+    /// Lowercased names and OIDs of the hidden attributes and of every type
+    /// derived from one.
     private let hidden: Set<String>
-    /// The server's schema was read, so numeric OIDs (and alias names) of
-    /// the hidden attributes are known too. Without it, an OID can't be
-    /// checked, so it isn't accepted at all.
+    /// Their supertypes: a filter on `name` also tests `sn`, so if `sn` is
+    /// hidden, `name` can't be filtered on either.
+    private let hiddenSupertypes: Set<String>
+    /// Every attribute name and OID the schema defines, lowercased.
+    private let known: Set<String>
+    /// Active Directory's anr, by name and OID: it searches whatever set of
+    /// attributes the server is configured with.
+    private let ambiguousNameResolution: Set<String>
+    /// The server's schema was read (and isn't empty), so names can be
+    /// resolved. Without it, nothing but objectClass is accepted.
     let knowsSchema: Bool
 
     init(extraHidden: [String] = [], schema: LdapSchema?) {
         var hidden = Set((Self.alwaysHidden + extraHidden).map { $0.lowercased() })
         hidden.insert("2.5.4.35") // userPassword, whatever else is known
-        if let schema {
+        var supertypes = Set<String>()
+        var known = Set<String>()
+        var anr: Set<String> = ["anr"]
+        let types = schema?.attributeTypes ?? []
+        func keys(_ type: SchemaAttributeType) -> [String] {
+            type.names.map { $0.lowercased() } + [type.oid.lowercased()]
+        }
+        if !types.isEmpty {
+            var byKey: [String: SchemaAttributeType] = [:]
+            for type in types {
+                for key in keys(type) { byKey[key] = type }
+            }
+            known = Set(byKey.keys)
+            anr.formUnion(byKey["anr"].map(keys) ?? [])
             // Every name and the OID of a hidden type, and of any type
             // derived from one, until nothing more is added.
             var added = true
             while added {
                 added = false
-                for type in schema.attributeTypes {
-                    let keys = type.names.map { $0.lowercased() } + [type.oid.lowercased()]
-                    let isHidden = keys.contains(where: hidden.contains)
+                for type in types {
+                    let isHidden = keys(type).contains(where: hidden.contains)
                         || type.superiorType.map { hidden.contains($0.lowercased()) } == true
-                    if isHidden, !keys.allSatisfy(hidden.contains) {
-                        hidden.formUnion(keys)
+                    if isHidden, !keys(type).allSatisfy(hidden.contains) {
+                        hidden.formUnion(keys(type))
                         added = true
                     }
                 }
             }
+            for type in types where keys(type).contains(where: hidden.contains) {
+                var superior = type.superiorType?.lowercased()
+                var depth = 0
+                while let name = superior, let parent = byKey[name], depth < 32 {
+                    supertypes.formUnion(keys(parent))
+                    superior = parent.superiorType?.lowercased()
+                    depth += 1
+                }
+            }
         }
         self.hidden = hidden
-        knowsSchema = schema != nil
+        hiddenSupertypes = supertypes.subtracting(hidden)
+        self.known = known
+        ambiguousNameResolution = anr
+        knowsSchema = !types.isEmpty
     }
 
     /// "member;range=0-1499" → "member".
     static func baseName(_ description: String) -> String {
         String(description.prefix { $0 != ";" }).lowercased()
-    }
-
-    static func isNumericOID(_ name: String) -> Bool {
-        name.first?.isNumber == true && name.allSatisfy { $0.isNumber || $0 == "." }
     }
 
     func isHidden(_ description: String) -> Bool {
@@ -89,7 +128,10 @@ nonisolated struct MCPAttributePolicy: Sendable {
     enum Violation: Error, CustomStringConvertible {
         case malformed(String)
         case hidden(String)
-        case unresolvedOID(String)
+        case hiddenSubtype(String)
+        case noSchema(String)
+        case unknown(String)
+        case ambiguousNameResolution
         case anyAttributeMatch
         case unparenthesized
 
@@ -99,8 +141,14 @@ nonisolated struct MCPAttributePolicy: Sendable {
                 return "\"\(name)\" isn't a valid attribute name."
             case let .hidden(name):
                 return "\"\(name)\" is hidden from agents — LDAP Studio never shares passwords, keys or the attributes its user chose to hide, not even in a filter."
-            case let .unresolvedOID(name):
-                return "Use attribute names rather than OIDs (\"\(name)\"): this server's schema couldn't be read to check them."
+            case let .hiddenSubtype(name):
+                return "\"\(name)\" can't be used in a filter: it also matches attributes hidden from agents, which are its subtypes. Filter on a more specific attribute."
+            case let .noSchema(name):
+                return "LDAP Studio couldn't read this server's schema, so it can't check \"\(name)\" against the attributes it hides from agents. Without the schema, filters can only test objectClass, and entries come back with all the attributes they may show."
+            case let .unknown(name):
+                return "This server's schema has no attribute \"\(name)\". get_schema lists the ones it has."
+            case .ambiguousNameResolution:
+                return "Ambiguous name resolution (anr) isn't allowed: it searches a server-defined set of attributes that may include hidden ones. Name the attributes, e.g. (|(cn=Ann*)(sAMAccountName=ann*))."
             case .anyAttributeMatch:
                 return "Extensible matches must name an attribute, e.g. (cn:caseExactMatch:=Alice)."
             case .unparenthesized:
@@ -109,13 +157,19 @@ nonisolated struct MCPAttributePolicy: Sendable {
         }
     }
 
-    /// Throws unless an agent may ask for `description`.
-    func check(_ description: String) throws {
+    /// Throws unless an agent may ask for `description` — as an attribute
+    /// to return, or, with `inFilter`, as one a filter tests.
+    func check(_ description: String, inFilter: Bool = false) throws {
         guard Self.isWellFormed(description) else { throw Violation.malformed(description) }
-        if isHidden(description) { throw Violation.hidden(description) }
-        if !knowsSchema, Self.isNumericOID(Self.baseName(description)) {
-            throw Violation.unresolvedOID(description)
+        let name = Self.baseName(description)
+        if hidden.contains(name) { throw Violation.hidden(description) }
+        if inFilter, hiddenSupertypes.contains(name) { throw Violation.hiddenSubtype(description) }
+        if inFilter, ambiguousNameResolution.contains(name) { throw Violation.ambiguousNameResolution }
+        guard knowsSchema else {
+            if name == "objectclass" { return }
+            throw Violation.noSchema(description)
         }
+        guard known.contains(name) else { throw Violation.unknown(description) }
     }
 
     /// Throws unless every attribute `filter` (RFC 4515) tests is one an
@@ -140,7 +194,7 @@ nonisolated struct MCPAttributePolicy: Sendable {
                 if cursor < scalars.count, scalars[cursor] == ":" { throw Violation.anyAttributeMatch }
                 continue
             }
-            try check(String(name))
+            try check(String(name), inFilter: true)
         }
     }
 }
