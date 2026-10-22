@@ -9,8 +9,12 @@
 #include <ctype.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <openssl/err.h>
 #include <openssl/evp.h>
+#include <openssl/pem.h>
+#include <openssl/ssl.h>
 #include <openssl/x509.h>
+#include <openssl/x509_vfy.h>
 #include <openssl/x509v3.h>
 #include <pthread.h>
 #include <sasl/sasl.h>
@@ -143,7 +147,9 @@ typedef struct {
   char *tls_cacert; /* PEM CA bundle shipped in the app; set once at startup */
   bool start_tls;
   bool allow_untrusted;
-  char *pinned_sha256; /* lowercase hex, no separators; NULL = none */
+  char *pinned_sha256;  /* lowercase hex, no separators; NULL = none */
+  char *trusted_ca_pem; /* see ls_set_tls_trust; NULL = none */
+  bool check_host_name;
   /* behavior + bind method — see ls_set_connection_policy */
   bool chase_referrals;
   unsigned timeout_seconds;
@@ -164,6 +170,7 @@ typedef struct {
 } ConnPolicy;
 
 static ConnPolicy g_policy = {
+    .check_host_name = true,
     .timeout_seconds = LS_CONNECT_TIMEOUT_SECS,
     .auth_method = LS_AUTH_SIMPLE,
     .ssh_port = 22,
@@ -184,6 +191,7 @@ static ConnPolicy *policy_clone(const ConnPolicy *src) {
   *p = *src;
   p->tls_cacert = ls_xstrdup(src->tls_cacert);
   p->pinned_sha256 = ls_xstrdup(src->pinned_sha256);
+  p->trusted_ca_pem = ls_xstrdup(src->trusted_ca_pem);
   p->auth_id = ls_xstrdup(src->auth_id);
   p->auth_realm = ls_xstrdup(src->auth_realm);
   p->client_cert_path = ls_xstrdup(src->client_cert_path);
@@ -200,6 +208,7 @@ static void policy_free(ConnPolicy *p) {
   if (!p) return;
   free(p->tls_cacert);
   free(p->pinned_sha256);
+  free(p->trusted_ca_pem);
   free(p->auth_id);
   free(p->auth_realm);
   free(p->client_cert_path);
@@ -484,6 +493,145 @@ void ls_set_tls_policy(bool start_tls, bool allow_untrusted,
   g_policy.pinned_sha256 = pinned_sha256 ? normalize_hex(pinned_sha256) : NULL;
 }
 
+void ls_set_tls_trust(const char *trusted_ca_pem, bool check_host_name) {
+  replace_string(&g_policy.trusted_ca_pem, trusted_ca_pem);
+  g_policy.check_host_name = check_host_name;
+}
+
+/* Whether the core checks the server's chain itself after the handshake
+ * (see ls_set_tls_trust) rather than leaving it to libldap. */
+static bool verifies_chain_itself(const ConnPolicy *p) {
+  return p->trusted_ca_pem != NULL || !p->check_host_name;
+}
+
+/* Whether libldap verifies the server's certificate during the handshake.
+ * Not when the connection is pinned, the core checks the chain itself, the
+ * user chose "allow untrusted", or it goes over a local SSH forward (whose
+ * cert can't match the real hostname): then it's the pin and the core's
+ * own check after the handshake (or nothing) that gate acceptance — see
+ * check_trusted_certificate. */
+static bool libldap_verifies(const ConnPolicy *p) {
+  return !(p->allow_untrusted || p->pinned_sha256 || p->ssh_enabled ||
+           verifies_chain_itself(p));
+}
+
+/* The TLS session (an OpenSSL SSL*) behind `ld`'s connection, once the
+ * handshake is done; NULL before. */
+static SSL *tls_session(LDAP *ld) {
+  void *ssl = NULL;
+  if (ldap_get_option(ld, LDAP_OPT_X_TLS_SSL_CTX, &ssl) != LDAP_OPT_SUCCESS) {
+    return NULL;
+  }
+  return ssl;
+}
+
+/* `host` as a certificate names it: an IPv6 address without the brackets
+ * an LDAP URI needs around it ("[::1]" → "::1"). Caller frees. */
+static char *certificate_host(const char *host) {
+  size_t len = strlen(host);
+  if (len >= 2 && host[0] == '[' && host[len - 1] == ']') {
+    return ls_strdup_n(host + 1, len - 2);
+  }
+  return ls_xstrdup(host);
+}
+
+/* Adds every certificate in a PEM bundle to `store`. */
+static void add_pem_certificates(X509_STORE *store, const char *pem) {
+  BIO *bio = BIO_new_mem_buf(pem, -1);
+  if (!bio) return;
+  X509 *cert = NULL;
+  while ((cert = PEM_read_bio_X509(bio, NULL, NULL, NULL)) != NULL) {
+    X509_STORE_add_cert(store, cert);
+    X509_free(cert);
+  }
+  /* Reading stops with "no start line" at the end of the bundle. */
+  ERR_clear_error();
+  BIO_free(bio);
+}
+
+/* Checks the chain the server presented on `ssl` against the bundled
+ * certificate authorities and the ones `p` trusts — each trusted one
+ * accepted as the top of the chain even when it isn't a root — and, when
+ * `host` isn't NULL, that the certificate was issued to it. Returns
+ * X509_V_OK, or the X509_V_ERR_* that failed. */
+static int verify_peer_chain(const ConnPolicy *p, SSL *ssl, const char *host) {
+  X509 *leaf = SSL_get0_peer_certificate(ssl);
+  if (!leaf) return X509_V_ERR_UNSPECIFIED;
+  X509_STORE *store = X509_STORE_new();
+  X509_STORE_CTX *ctx = X509_STORE_CTX_new();
+  if (!store || !ctx) {
+    X509_STORE_free(store);
+    X509_STORE_CTX_free(ctx);
+    return X509_V_ERR_OUT_OF_MEM;
+  }
+  /* The bundled authorities, or OpenSSL's own like libldap would use
+   * without ls_set_tls_cacert. */
+  if (p->tls_cacert) {
+    X509_STORE_load_file(store, p->tls_cacert);
+  } else {
+    X509_STORE_set_default_paths(store);
+  }
+  if (p->trusted_ca_pem) add_pem_certificates(store, p->trusted_ca_pem);
+  X509_STORE_set_flags(store, X509_V_FLAG_PARTIAL_CHAIN);
+  ERR_clear_error();
+
+  int result = X509_V_ERR_UNSPECIFIED;
+  /* On the client side the presented chain starts with the server's own
+   * certificate; the rest are the intermediates it sent. */
+  if (X509_STORE_CTX_init(ctx, store, leaf, SSL_get_peer_cert_chain(ssl)) ==
+      1) {
+    X509_STORE_CTX_set_purpose(ctx, X509_PURPOSE_SSL_SERVER);
+    X509_VERIFY_PARAM *param = X509_STORE_CTX_get0_param(ctx);
+    if (host && *host) {
+      char *name = certificate_host(host);
+      if (X509_VERIFY_PARAM_set1_ip_asc(param, name) != 1) {
+        X509_VERIFY_PARAM_set1_host(param, name, 0);
+      }
+      free(name);
+    }
+    result =
+        X509_verify_cert(ctx) == 1 ? X509_V_OK : X509_STORE_CTX_get_error(ctx);
+  }
+  X509_STORE_CTX_free(ctx);
+  X509_STORE_free(store);
+  ERR_clear_error();
+  return result;
+}
+
+/* Whether verify_peer_chain failed for want of a trusted certificate
+ * authority — the one failure trusting another one can fix. */
+static bool is_untrusted_issuer(int code) {
+  switch (code) {
+    case X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT:
+    case X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN:
+    case X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT:
+    case X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY:
+    case X509_V_ERR_UNABLE_TO_VERIFY_LEAF_SIGNATURE:
+      return true;
+    default:
+      return false;
+  }
+}
+
+/* Why verify_peer_chain refused a certificate, in words for the app. */
+static const char *chain_failure_reason(int code) {
+  if (is_untrusted_issuer(code)) {
+    return "it wasn't issued by a certificate authority trusted for this "
+           "connection";
+  }
+  switch (code) {
+    case X509_V_ERR_HOSTNAME_MISMATCH:
+    case X509_V_ERR_IP_ADDRESS_MISMATCH:
+      return "the certificate was issued to a different host name";
+    case X509_V_ERR_CERT_HAS_EXPIRED:
+      return "a certificate in its chain has expired";
+    case X509_V_ERR_CERT_NOT_YET_VALID:
+      return "a certificate in its chain isn't valid yet";
+    default:
+      return X509_verify_cert_error_string(code);
+  }
+}
+
 /* Lowercase-hex encode `len` bytes into `out` (needs len*2 + 1 bytes). */
 static void hex_encode(const unsigned char *bytes, size_t len, char *out) {
   static const char digits[] = "0123456789abcdef";
@@ -548,9 +696,7 @@ static LSErrorKind classify_tls_failure(const ConnPolicy *p, const char *host,
    * for SSH-tunneled ones (the cert can't match 127.0.0.1), so a failure
    * there can't be a rejected certificate — and a direct re-probe of an
    * SSH-only-reachable host would just wait out the timeout again. */
-  if (p->allow_untrusted || p->pinned_sha256 != NULL || p->ssh_enabled) {
-    return LS_CONNECT_FAILED;
-  }
+  if (!libldap_verifies(p)) return LS_CONNECT_FAILED;
   LSCertInfo probe = {0};
   LSError probe_err = {0};
   int prc = probe_certificate(p, host, port, use_ssl, p->start_tls, &probe,
@@ -566,12 +712,9 @@ static LSErrorKind classify_tls_failure(const ConnPolicy *p, const char *host,
  * cognitive complexity down. */
 static void apply_tls_client_options(const ConnPolicy *p, LDAP *ld) {
   /* Verification stays at the library default (demand a valid chain)
-   * unless the connection is pinned, the user chose "allow untrusted", or
-   * it's going over a local SSH forward (whose cert can't match the real
-   * hostname) — then it's the pin (or nothing) that gates acceptance. */
-  int require = (p->allow_untrusted || p->pinned_sha256 || p->ssh_enabled)
-                    ? LDAP_OPT_X_TLS_NEVER
-                    : LDAP_OPT_X_TLS_DEMAND;
+   * unless libldap_verifies says otherwise. */
+  int require =
+      libldap_verifies(p) ? LDAP_OPT_X_TLS_DEMAND : LDAP_OPT_X_TLS_NEVER;
   ldap_set_option(ld, LDAP_OPT_X_TLS_REQUIRE_CERT, &require);
   /* The bundled OpenSSL can't reach its own default store under the
    * sandbox, so point it at the app's CA bundle when we're verifying. */
@@ -592,6 +735,16 @@ static void apply_tls_client_options(const ConnPolicy *p, LDAP *ld) {
  * certificate or a plain socket/timeout failure. `elapsed_seconds` — see
  * classify_tls_failure — is what actually catches our own configured
  * timeout firing, since libldap doesn't report it as LDAP_TIMEOUT. */
+/* ls_fail for a failed connect/StartTLS step, `kind` from
+ * classify_tls_failure: a refused certificate says so rather than echoing
+ * libldap's "Can't contact LDAP server". */
+static int fail_tls_step(LSError *err, LSErrorKind kind, const char *host,
+                         uint16_t port, int rc) {
+  return ls_fail(err, kind, host, port,
+                 kind == LS_TLS_UNTRUSTED ? "it couldn't be verified"
+                                          : ldap_err2string(rc));
+}
+
 static LSErrorKind classify_connect_failure(const ConnPolicy *p, bool tls,
                                             const char *host, uint16_t port,
                                             bool use_ssl, int rc,
@@ -647,6 +800,37 @@ static LSErrorKind classify_bind_failure(int rc) {
   return LS_BIND_FAILED;
 }
 
+/* With TLS up and nothing sent yet: whether the server's certificate is
+ * one this connection accepts, where that's down to the pin or the core's
+ * own chain check rather than libldap's (see apply_tls_client_options).
+ * NULL when it is, otherwise why not. A matching pin is enough on its own;
+ * so is a chain that leads to a trusted certificate authority. `host` is
+ * the real server, not the SSH forward. */
+static const char *check_trusted_certificate(const ConnPolicy *p, LDAP *ld,
+                                             const char *host) {
+  /* Left to libldap, or deliberately to nothing (allow untrusted, or an
+   * SSH forward with nothing trusted of its own). */
+  if (!p->pinned_sha256 && !verifies_chain_itself(p)) return NULL;
+  if (p->pinned_sha256) {
+    char got[(EVP_MAX_MD_SIZE * 2) + 1] = {0};
+    if (peer_cert_sha256(ld, got) && strcmp(got, p->pinned_sha256) == 0) {
+      return NULL;
+    }
+  }
+  /* A certificate that replaced a pinned one still gets in on a chain the
+   * bundled certificate authorities vouch for — the pin is an addition to
+   * normal verification, not a replacement for it. */
+  SSL *ssl = tls_session(ld);
+  if (!ssl) return "the server's certificate could not be read";
+  int code = verify_peer_chain(p, ssl, p->check_host_name ? host : NULL);
+  if (code == X509_V_OK) return NULL;
+  if (p->pinned_sha256 && !p->trusted_ca_pem) {
+    return "server certificate does not match the fingerprint trusted for "
+           "this connection";
+  }
+  return chain_failure_reason(code);
+}
+
 /* The actual connect+bind attempt — everything ls_connect_and_bind did
  * before the hard-deadline wrapper below was added. Still reads the g_*
  * policy globals directly; see ls_connect_and_bind for why that's safe
@@ -687,7 +871,11 @@ static int connect_once(const ConnPolicy *p, const char *host, uint16_t port,
 
   int version = LDAP_VERSION3;
   ldap_set_option(ld, LDAP_OPT_PROTOCOL_VERSION, &version);
-  if (p->chase_referrals) {
+  /* libldap follows a referral on a connection of its own, which nothing
+   * but its own handshake checks — so not when that check is off and the
+   * core verifies the certificate after the fact instead: the server a
+   * referral leads to could present any certificate at all. */
+  if (p->chase_referrals && (!tls || libldap_verifies(p))) {
     ldap_set_option(ld, LDAP_OPT_REFERRALS, LDAP_OPT_ON);
   } else {
     ldap_set_option(ld, LDAP_OPT_REFERRALS, LDAP_OPT_OFF);
@@ -704,9 +892,9 @@ static int connect_once(const ConnPolicy *p, const char *host, uint16_t port,
     rc = run_with_deadline(ld, p->timeout_seconds, call_ldap_start_tls);
     if (rc != LDAP_SUCCESS) {
       double elapsed = monotonic_seconds() - attempt_start;
-      int out_rc = ls_fail(
+      int out_rc = fail_tls_step(
           err, classify_tls_failure(p, host, port, use_ssl, rc, elapsed), host,
-          port, ldap_err2string(rc));
+          port, rc);
       ldap_unbind_ext_s(ld, NULL, NULL);
       return out_rc;
     }
@@ -722,7 +910,7 @@ static int connect_once(const ConnPolicy *p, const char *host, uint16_t port,
     double elapsed = monotonic_seconds() - ldap_connect_start;
     LSErrorKind kind =
         classify_connect_failure(p, tls, host, port, use_ssl, rc, elapsed);
-    int out_rc = ls_fail(err, kind, host, port, ldap_err2string(rc));
+    int out_rc = fail_tls_step(err, kind, host, port, rc);
     ldap_unbind_ext_s(ld, NULL, NULL);
     return out_rc;
   }
@@ -751,12 +939,10 @@ static int connect_once(const ConnPolicy *p, const char *host, uint16_t port,
     setsockopt(socket_fd, IPPROTO_TCP, TCP_KEEPCNT, &count, sizeof count);
   }
 
-  if (p->pinned_sha256 && tls) {
-    char got[(EVP_MAX_MD_SIZE * 2) + 1] = {0};
-    if (!peer_cert_sha256(ld, got) || strcmp(got, p->pinned_sha256) != 0) {
-      int out_rc = ls_fail(err, LS_TLS_UNTRUSTED, host, port,
-                           "server certificate does not match the "
-                           "fingerprint trusted for this connection");
+  if (tls) {
+    const char *refused = check_trusted_certificate(p, ld, host);
+    if (refused) {
+      int out_rc = ls_fail(err, LS_TLS_UNTRUSTED, host, port, refused);
       ldap_unbind_ext_s(ld, NULL, NULL);
       return out_rc;
     }
@@ -1045,15 +1231,49 @@ static char *x509_sha256_hex(X509 *cert) {
   return out;
 }
 
+/* Every certificate the server presented on `ssl`, as PEM, its own
+ * (`leaf`) first. Caller frees. */
+static char *presented_chain_pem(SSL *ssl, X509 *leaf) {
+  BIO *bio = BIO_new(BIO_s_mem());
+  if (!bio) return ls_xstrdup("");
+  const STACK_OF(X509) *chain = SSL_get_peer_cert_chain(ssl);
+  int count = chain ? sk_X509_num(chain) : 0;
+  if (count == 0) {
+    PEM_write_bio_X509(bio, leaf);
+  }
+  for (int i = 0; i < count; i++) {
+    PEM_write_bio_X509(bio, sk_X509_value(chain, i));
+  }
+  char *data = NULL;
+  long len = BIO_get_mem_data(bio, &data);
+  char *out = ls_strdup_n(data, len > 0 ? (size_t)len : 0);
+  BIO_free(bio);
+  return out;
+}
+
 static int probe_certificate(const ConnPolicy *p, const char *host,
                              uint16_t port, bool use_ssl, bool start_tls,
                              LSCertInfo *out, LSError *err) {
   memset(out, 0, sizeof *out);
 
+  /* Through the connection's SSH tunnel when it has one — the server may
+   * not be reachable any other way. The certificate is still checked
+   * against the real host name. */
+  const char *connect_host = host;
+  uint16_t connect_port = port;
+  if (p->ssh_enabled) {
+    uint64_t generation = 0;
+    bool reused = false;
+    int tunnel_rc = acquire_ssh_tunnel(p, host, port, &connect_port,
+                                       &generation, &reused, err);
+    if (tunnel_rc != LS_OK) return tunnel_rc;
+    connect_host = "127.0.0.1";
+  }
+
   const char *scheme = "ldap";
   if (use_ssl) scheme = "ldaps";
-  char *uri =
-      ls_aprintf("%s://%s:%u", scheme, host ? host : "", (unsigned)port);
+  char *uri = ls_aprintf("%s://%s:%u", scheme, connect_host ? connect_host : "",
+                         (unsigned)connect_port);
   LDAP *ld = NULL;
   int rc = ldap_initialize(&ld, uri);
   free(uri);
@@ -1092,23 +1312,20 @@ static int probe_certificate(const ConnPolicy *p, const char *host,
     return out_rc;
   }
 
-  /* LDAP_OPT_X_TLS_PEERCERT fills a caller-provided struct berval (not a
-   * pointer to one) with a malloc'd copy of the DER cert; free bv_val. */
-  struct berval der = {0, NULL};
-  if (ldap_get_option(ld, LDAP_OPT_X_TLS_PEERCERT, &der) != LDAP_OPT_SUCCESS ||
-      !der.bv_val) {
+  SSL *ssl = tls_session(ld);
+  X509 *cert = ssl ? SSL_get1_peer_certificate(ssl) : NULL;
+  if (!cert) {
     ldap_unbind_ext_s(ld, NULL, NULL);
     return ls_fail(err, LS_CONNECT_FAILED, host, port,
                    "the server did not present a certificate");
   }
-  const unsigned char *der_cursor = (const unsigned char *)der.bv_val;
-  X509 *cert = d2i_X509(NULL, &der_cursor, (long)der.bv_len);
-  ldap_memfree(der.bv_val);
+  out->chain_pem = presented_chain_pem(ssl, cert);
+  int chain_code = verify_peer_chain(p, ssl, NULL);
+  out->chain_trusted = chain_code == X509_V_OK;
+  out->untrusted_issuer = is_untrusted_issuer(chain_code);
+  out->chain_problem =
+      ls_xstrdup(out->chain_trusted ? "" : chain_failure_reason(chain_code));
   ldap_unbind_ext_s(ld, NULL, NULL);
-  if (!cert) {
-    return ls_fail(err, LS_DECODE_FAILED, host, port,
-                   "could not parse the server certificate");
-  }
 
   const X509_NAME *subject = X509_get_subject_name(cert);
   const X509_NAME *issuer = X509_get_issuer_name(cert);
@@ -1126,9 +1343,13 @@ static int probe_certificate(const ConnPolicy *p, const char *host,
                  ASN1_TIME_cmp_time_t(X509_get0_notBefore(cert), now) == 1;
 
   out->host_mismatch = false;
-  if (host && *host &&
-      X509_check_host(cert, host, strlen(host), 0, NULL) != 1) {
-    out->host_mismatch = true;
+  if (host && *host) {
+    char *name = certificate_host(host);
+    /* -2: not an IP address, so a host name. */
+    int match = X509_check_ip_asc(cert, name, 0);
+    if (match == -2) match = X509_check_host(cert, name, strlen(name), 0, NULL);
+    out->host_mismatch = match != 1;
+    free(name);
   }
 
   X509_free(cert);
@@ -1147,5 +1368,7 @@ void ls_cert_info_dispose(LSCertInfo *info) {
   free(info->sha256);
   free(info->not_before);
   free(info->not_after);
+  free(info->chain_pem);
+  free(info->chain_problem);
   memset(info, 0, sizeof *info);
 }

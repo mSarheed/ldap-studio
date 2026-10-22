@@ -10,7 +10,8 @@ set -euo pipefail
 #   scripts/test-server/run.sh reset   stop, delete all data, start fresh
 #
 # Listens on ldap://127.0.0.1:3389 (StartTLS available) and
-# ldaps://127.0.0.1:3636 (self-signed certificate). Two suffixes:
+# ldaps://127.0.0.1:3636, with a certificate for localhost from a test
+# CA (see write_certificates). Two suffixes:
 #
 #   dc=example,dc=com  ~151k entries; ou=People has 76,000 direct children
 #   dc=small,dc=test   a couple of dozen entries
@@ -103,12 +104,32 @@ access to *
 EOF
 }
 
+# A root CA, an issuing CA under it, and the server's certificate from the
+# issuing CA, the way an Active Directory domain controller's usually is.
+# The server sends its own certificate and the issuing CA's, not the
+# root's. Issued to localhost only, so 127.0.0.1 is a name mismatch.
+write_certificates() {
+    local ext="$DIR/cert.ext"
+    openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj "/CN=LDAP Studio Test Root CA" \
+        -keyout "$DIR/root-ca.key" -out "$DIR/root-ca.crt" 2>/dev/null
+    printf 'basicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\n' > "$ext"
+    openssl req -new -newkey rsa:2048 -nodes -subj "/CN=LDAP Studio Test Issuing CA" \
+        -keyout "$DIR/issuing-ca.key" -out "$DIR/issuing-ca.csr" 2>/dev/null
+    openssl x509 -req -days 3650 -in "$DIR/issuing-ca.csr" -CA "$DIR/root-ca.crt" -CAkey "$DIR/root-ca.key" \
+        -set_serial 2 -extfile "$ext" -out "$DIR/issuing-ca.crt" 2>/dev/null
+    printf 'basicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:localhost\n' > "$ext"
+    openssl req -new -newkey rsa:2048 -nodes -subj "/CN=localhost" \
+        -keyout "$DIR/server.key" -out "$DIR/server.csr" 2>/dev/null
+    openssl x509 -req -days 3650 -in "$DIR/server.csr" -CA "$DIR/issuing-ca.crt" -CAkey "$DIR/issuing-ca.key" \
+        -set_serial 3 -extfile "$ext" -out "$DIR/server-only.crt" 2>/dev/null
+    cat "$DIR/server-only.crt" "$DIR/issuing-ca.crt" > "$DIR/server.crt"
+    rm -f "$ext" "$DIR"/*.csr
+}
+
 seed() {
     mkdir -p "$DIR/example" "$DIR/small"
-    if [[ ! -f "$DIR/server.crt" ]]; then
-        openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
-            -subj "/CN=127.0.0.1" -addext "subjectAltName=IP:127.0.0.1,DNS:localhost" \
-            -keyout "$DIR/server.key" -out "$DIR/server.crt" 2>/dev/null
+    if [[ ! -f "$DIR/issuing-ca.crt" ]]; then
+        write_certificates
     fi
     write_config
     if [[ ! -f "$DIR/example/data.mdb" ]]; then

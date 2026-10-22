@@ -486,6 +486,7 @@ struct EditEntryView: View {
         let ssl = connection.useSSL
         let sTLS = connection.useStartTLS
         let pin = connection.trustedCertSHA256
+        let options = connection.ldapOptions
         let ro = connection.isReadOnly
         let bind = connection.bindDN
         let pw = password
@@ -494,7 +495,7 @@ struct EditEntryView: View {
         func add(_ attr: String, _ value: String) {
             writes.append(Write(label: "+\(attr)") {
                 try await addAttributeValue(host: host, port: port, useSsl: ssl, readOnly: ro,
-                                            startTLS: sTLS, pinnedCertSHA256: pin,
+                                            startTLS: sTLS, pinnedCertSHA256: pin, options: options,
                                             bindDn: bind, password: pw, dn: target,
                                             attribute: attr, value: value)
             })
@@ -502,7 +503,7 @@ struct EditEntryView: View {
         func remove(_ attr: String, _ value: String) {
             writes.append(Write(label: "−\(attr)") {
                 try await deleteAttributeValue(host: host, port: port, useSsl: ssl, readOnly: ro,
-                                               startTLS: sTLS, pinnedCertSHA256: pin,
+                                               startTLS: sTLS, pinnedCertSHA256: pin, options: options,
                                                bindDn: bind, password: pw, dn: target,
                                                attribute: attr, value: value, isBinary: false)
             })

@@ -173,6 +173,23 @@ void ls_set_tls_cacert(const char *path);
 void ls_set_tls_policy(bool start_tls, bool allow_untrusted,
                        const char *pinned_sha256);
 
+/* Certificate authorities the next connect trusts besides the bundled
+ * ones, applied the same sticky way as ls_set_tls_policy. `trusted_ca_pem`
+ * holds one or more PEM certificates; each is accepted as the top of the
+ * chain even when it isn't a root (an issuing CA, say), so a server is
+ * accepted when any certificate authority between it and the root is
+ * trusted. That's what makes one setting cover every server a host name
+ * leads to (an Active Directory domain name leads to every domain
+ * controller, each with a certificate of its own) and survive the
+ * certificates being renewed. `check_host_name` false accepts a
+ * certificate issued to another name. With trusted CAs or the host name
+ * check off, libldap's own verification is off and the core checks the
+ * chain itself once the handshake is done, before anything is sent —
+ * through an SSH tunnel too, against the real host name. A pin set with
+ * ls_set_tls_policy still accepts its certificate on its own. Pass
+ * NULL/"" and true to reset. */
+void ls_set_tls_trust(const char *trusted_ca_pem, bool check_host_name);
+
 typedef enum {
   LS_AUTH_SIMPLE = 0,
   LS_AUTH_EXTERNAL,
@@ -210,10 +227,11 @@ void ls_close_ssh_tunnels(void);
 void ls_shutdown(unsigned wait_ms);
 
 /* Connects with certificate verification disabled purely to read back the
- * server's leaf certificate, so the app can show it and ask the user
- * whether to trust it. Returns LS_OK even when the cert wouldn't normally
- * validate; the booleans say why it wouldn't. All strings are owned by
- * the struct — release with ls_cert_info_dispose. */
+ * server's certificates, so the app can show them and ask the user what to
+ * trust — through the SSH tunnel set with ls_set_ssh_policy, if any. Returns
+ * LS_OK even when the cert wouldn't normally validate; the booleans say why it
+ * wouldn't. All strings are owned by the struct — release with
+ * ls_cert_info_dispose. */
 typedef struct {
   char *subject;
   char *issuer;
@@ -223,6 +241,17 @@ typedef struct {
   bool self_signed;
   bool expired;
   bool host_mismatch;
+  /* Every certificate the server presented, its own first, as PEM. */
+  char *chain_pem;
+  /* Whether that chain leads to a certificate authority set with
+   * ls_set_tls_trust or a bundled one — expiry counts, the host name
+   * doesn't. */
+  bool chain_trusted;
+  /* When it doesn't: whether that's for want of a trusted certificate
+   * authority (the one thing trusting another can fix), and why, in
+   * words. */
+  bool untrusted_issuer;
+  char *chain_problem;
 } LSCertInfo;
 
 int ls_probe_certificate(const char *host, uint16_t port, bool use_ssl,

@@ -14,6 +14,74 @@ func connection(_ bind: String, _ pw: String, base: String = "dc=example,dc=com"
     return c
 }
 
+/// Trusting the certificate authority that issued the server's certificate
+/// rather than the certificate itself. The server's certificate is for
+/// localhost only, from an issuing CA under a root (see run.sh).
+@MainActor func certificateAuthorityChecks() async {
+    let env = ProcessInfo.processInfo.environment
+    let dir = env["TEST_DIR"]!
+    func der(_ file: String) -> Data { PEM.decodeCertificates(try! String(contentsOfFile: file, encoding: .utf8))[0] }
+    let issuing = der("\(dir)/issuing-ca.crt"), root = der("\(dir)/root-ca.crt"), other = der(env["OTHER_CA"]!)
+    func ldaps(_ host: String) -> SavedConnection {
+        var c = connection("cn=reader,ou=Service,dc=example,dc=com", "reader")
+        c.host = host; c.port = 3636; c.useSSL = true
+        return c
+    }
+    func reads(_ c: SavedConnection) async -> String? {
+        do { _ = try await fetchEntry(c.ldapTarget, dn: "dc=example,dc=com"); return nil } catch { return "\(error)" }
+    }
+
+    var c = ldaps("127.0.0.1")
+    let refused = await reads(c)
+    check(refused?.contains("isn't trusted") == true, "LDAPS from an unknown CA refused: \(refused ?? "connected")")
+    guard let probe = try? await probeCertificate(host: "127.0.0.1", port: 3636, useSsl: true, startTLS: false) else {
+        return check(false, "probe the server's certificate")
+    }
+    check(probe.chain.count == 2 && !probe.chainTrusted && probe.hostMismatch,
+          "probe: certificate and issuing CA presented, not trusted, issued to another name")
+    check(probe.presentedAuthorities.map(\.der) == [issuing] && probe.presentedAuthorities.first?.name == "LDAP Studio Test Issuing CA",
+          "probe offers the issuing CA to trust")
+    check(probe.problem(for: c) == .untrustedIssuer, "problem: untrusted issuer")
+    let brokenChain = LdapCertificate(subject: "", issuer: "", sha256: "", notBefore: "", notAfter: "",
+                                      selfSigned: false, expired: false, hostMismatch: false, chain: [],
+                                      chainTrusted: false, untrustedIssuer: false,
+                                      chainProblem: "a certificate in its chain has expired")
+    check(brokenChain.problem(for: c) == .invalidChain("a certificate in its chain has expired"),
+          "problem: a chain that fails otherwise isn't offered another CA")
+
+    c.trustedCertSHA256 = probe.sha256
+    c.trust(.certificateAuthority(issuing, acceptingOtherHostNames: false))
+    check(c.trustedCACertificates == [issuing] && c.trustedCertSHA256 == nil && c.checksCertificateHostName,
+          "trusting the CA replaces the certificate trusted on its own")
+    let otherName = await reads(c)
+    check(otherName?.contains("different host name") == true, "trusted CA, certificate for another name refused: \(otherName ?? "connected")")
+    let reprobe = try? await probeCertificate(host: "127.0.0.1", port: 3636, useSsl: true, startTLS: false,
+                                              options: c.ldapOptions)
+    check(reprobe?.chainTrusted == true && reprobe?.problem(for: c) == .otherHostName, "probe with the CA trusted: only the name is wrong")
+    c.trust(.otherHostNames)
+    check(await reads(c) == nil, "trusted CA, host-name check off: connects")
+
+    var byName = ldaps("localhost")
+    byName.trust(.certificateAuthority(issuing, acceptingOtherHostNames: false))
+    check(await reads(byName) == nil, "LDAPS, issuing CA trusted, matching name: connects")
+    byName.useSSL = false; byName.port = 3389; byName.useStartTLS = true
+    check(await reads(byName) == nil, "StartTLS, issuing CA trusted: connects")
+    byName.trustedCACertificates = [root]
+    check(await reads(byName) == nil, "StartTLS, root CA trusted: connects")
+    byName.trustedCACertificates = [other]
+    let unrelated = await reads(byName)
+    check(unrelated?.contains("certificate authority trusted for this connection") == true,
+          "unrelated CA trusted: refused (\(unrelated ?? "connected"))")
+    byName.trustedCertSHA256 = probe.sha256
+    check(await reads(byName) == nil, "unrelated CA but the certificate itself trusted: connects")
+
+    // Saved and loaded again, and older files without the new keys.
+    let saved = try! JSONDecoder().decode(SavedConnection.self, from: JSONEncoder().encode(c))
+    check(saved.trustedCACertificates == [issuing] && !saved.checksCertificateHostName, "trusted CAs survive saving")
+    let old = try! JSONDecoder().decode(SavedConnection.self, from: Data(#"{"id":"\#(UUID())","name":"o","host":"h","port":636,"useSSL":true,"bindDN":""}"#.utf8))
+    check(old.trustedCACertificates.isEmpty && old.checksCertificateHostName, "older saved connections load with the defaults")
+}
+
 @MainActor func run() async {
     let reader = connection("cn=reader,ou=Service,dc=example,dc=com", "reader")
     let tree = DirectoryTree(connection: reader)
@@ -118,6 +186,8 @@ func connection(_ bind: String, _ pw: String, base: String = "dc=example,dc=com"
     KeychainService.passwords[stls.id] = "reader"
     let e2 = try? await fetchEntry(stls.ldapTarget, dn: "dc=example,dc=com")
     check(e2 != nil, "StartTLS with pinned certificate")
+
+    await certificateAuthorityChecks()
 
     // cancel a search
     let task = Task { try await searchAll(tree.target, LdapSearchRequest(baseDn: "dc=example,dc=com", scope: .subtree)) }

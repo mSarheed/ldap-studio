@@ -26,6 +26,8 @@ struct ExportableConnection: Codable {
     var isFavorite: Bool
     var isReadOnly: Bool
     var trustedCertSHA256: String?
+    var trustedCACertificates: [Data]
+    var checksCertificateHostName: Bool
     var chaseReferrals: Bool
     var timeoutSeconds: Int
     var authentication: LDAPAuthentication
@@ -49,7 +51,7 @@ struct ExportableConnection: Codable {
 
     enum CodingKeys: String, CodingKey {
         case name, host, port, useSSL, useStartTLS, baseDN, bindDN, bookmarks, savedFilters, isFavorite, isReadOnly
-        case trustedCertSHA256, chaseReferrals, timeoutSeconds, authentication, saslAuthID, saslRealm
+        case trustedCertSHA256, trustedCACertificates, checksCertificateHostName, chaseReferrals, timeoutSeconds, authentication, saslAuthID, saslRealm
         case useSSHTunnel, sshHost, sshPort, sshUsername, sshAuthentication, sshHostKeySHA256
         case password, passwordIsBase64, sshPassword, sshPasswordIsBase64
     }
@@ -58,6 +60,7 @@ struct ExportableConnection: Codable {
          baseDN: String, bindDN: String, bookmarks: [String] = [],
          savedFilters: [SavedLDAPFilter] = [], isFavorite: Bool = false,
          isReadOnly: Bool = false, trustedCertSHA256: String? = nil,
+         trustedCACertificates: [Data] = [], checksCertificateHostName: Bool = true,
          chaseReferrals: Bool = false, timeoutSeconds: Int = 15,
          authentication: LDAPAuthentication = .simple, saslAuthID: String = "",
          saslRealm: String = "", useSSHTunnel: Bool = false,
@@ -78,6 +81,8 @@ struct ExportableConnection: Codable {
         self.isFavorite = isFavorite
         self.isReadOnly = isReadOnly
         self.trustedCertSHA256 = trustedCertSHA256
+        self.trustedCACertificates = trustedCACertificates
+        self.checksCertificateHostName = checksCertificateHostName
         self.chaseReferrals = chaseReferrals
         self.timeoutSeconds = timeoutSeconds
         self.authentication = authentication
@@ -111,6 +116,8 @@ struct ExportableConnection: Codable {
         isFavorite = try container.decodeIfPresent(Bool.self, forKey: .isFavorite) ?? false
         isReadOnly = try container.decodeIfPresent(Bool.self, forKey: .isReadOnly) ?? false
         trustedCertSHA256 = try container.decodeIfPresent(String.self, forKey: .trustedCertSHA256)
+        trustedCACertificates = try container.decodeIfPresent([Data].self, forKey: .trustedCACertificates) ?? []
+        checksCertificateHostName = try container.decodeIfPresent(Bool.self, forKey: .checksCertificateHostName) ?? true
         chaseReferrals = try container.decodeIfPresent(Bool.self, forKey: .chaseReferrals) ?? false
         timeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .timeoutSeconds) ?? 15
         authentication = try container.decodeIfPresent(LDAPAuthentication.self, forKey: .authentication) ?? .simple
@@ -142,6 +149,8 @@ struct ExportableConnection: Codable {
         try container.encode(isFavorite, forKey: .isFavorite)
         try container.encode(isReadOnly, forKey: .isReadOnly)
         try container.encodeIfPresent(trustedCertSHA256, forKey: .trustedCertSHA256)
+        if !trustedCACertificates.isEmpty { try container.encode(trustedCACertificates, forKey: .trustedCACertificates) }
+        if !checksCertificateHostName { try container.encode(false, forKey: .checksCertificateHostName) }
         try container.encode(chaseReferrals, forKey: .chaseReferrals)
         try container.encode(timeoutSeconds, forKey: .timeoutSeconds)
         try container.encode(authentication, forKey: .authentication)
@@ -192,6 +201,8 @@ extension ExportableConnection {
             isFavorite: connection.isFavorite,
             isReadOnly: connection.isReadOnly,
             trustedCertSHA256: connection.trustedCertSHA256,
+            trustedCACertificates: connection.trustedCACertificates,
+            checksCertificateHostName: connection.checksCertificateHostName,
             chaseReferrals: connection.chaseReferrals,
             timeoutSeconds: connection.timeoutSeconds,
             authentication: connection.authentication,
